@@ -1,49 +1,71 @@
 import React from 'react';
-import { Database, HardDrive, ShieldCheck, AlertCircle } from 'lucide-react';
+import { Database, HardDrive, Cpu, ShieldCheck, Activity } from 'lucide-react';
 import { useDriveStore } from '../../stores/driveStore';
+import { formatBytes } from '../../utils/formatters';
 
 export const StatusBar: React.FC = () => {
-  const { drives, dbHealth, error } = useDriveStore();
+  const { drives, selectedDriveId, systemInfo, dbHealth, error } = useDriveStore();
+  const selectedDrive = drives.find((d) => d.id === selectedDriveId) || drives[0];
 
   return (
-    <footer className="h-7 border-t border-slate-800 bg-slate-950 px-4 flex items-center justify-between text-[11px] text-slate-400 select-none">
+    <footer className="h-6 border-t border-border bg-[#121417] px-3 flex items-center justify-between text-[11px] text-muted select-none z-20 font-mono">
+      {/* Left: Storage Engine Status */}
       <div className="flex items-center gap-4">
-        {/* DB Status */}
-        <div className="flex items-center gap-1.5">
-          <Database className="w-3.5 h-3.5 text-sky-400" />
+        {/* Active Volume */}
+        {selectedDrive ? (
+          <div className="flex items-center gap-1.5 text-secondary">
+            <HardDrive className="w-3 h-3 text-accent" />
+            <span>Target:</span>
+            <span className="text-primary font-medium">{selectedDrive.mountPoint}</span>
+            <span className="text-muted">({formatBytes(selectedDrive.availableBytes)} free)</span>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5 text-muted">
+            <HardDrive className="w-3 h-3" />
+            <span>No drive selected</span>
+          </div>
+        )}
+
+        {/* Database WAL */}
+        <div className="hidden sm:flex items-center gap-1.5">
+          <Database className="w-3 h-3 text-success" />
           <span>SQLite:</span>
           {dbHealth ? (
-            <span className="flex items-center gap-1 text-emerald-400 font-medium">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+            <span className="text-secondary">
               v{dbHealth.migrationVersion} ({dbHealth.tablesCount} tables)
             </span>
           ) : (
-            <span className="text-slate-500">Connecting...</span>
+            <span>Connecting...</span>
           )}
         </div>
 
-        {/* Drives Count */}
-        <div className="flex items-center gap-1.5">
-          <HardDrive className="w-3.5 h-3.5 text-slate-400" />
-          <span>Drives:</span>
-          <span className="text-slate-200 font-medium">{drives.length}</span>
+        {/* Scanner State */}
+        <div className="hidden md:flex items-center gap-1.5">
+          <Activity className="w-3 h-3 text-muted" />
+          <span>Engine:</span>
+          <span className="text-secondary">Ready (Rayon / Tokio staged)</span>
         </div>
       </div>
 
-      <div className="flex items-center gap-3">
+      {/* Right: Environment & Safety */}
+      <div className="flex items-center gap-4">
         {error ? (
-          <div className="flex items-center gap-1 text-rose-400">
-            <AlertCircle className="w-3.5 h-3.5" />
-            <span className="truncate max-w-xs">{error}</span>
-          </div>
+          <span className="text-danger truncate max-w-xs">{error}</span>
         ) : (
-          <div className="flex items-center gap-1 text-slate-400">
-            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Local & Read-Only Safe</span>
+          <div className="hidden lg:flex items-center gap-1 text-secondary">
+            <ShieldCheck className="w-3 h-3 text-success" />
+            <span>Local-Only</span>
+          </div>
+        )}
+
+        {systemInfo && (
+          <div className="flex items-center gap-1.5 text-secondary">
+            <Cpu className="w-3 h-3 text-accent" />
+            <span>{systemInfo.arch}</span>
+            <span className="text-muted">({systemInfo.cpuCount}c)</span>
           </div>
         )}
       </div>
     </footer>
   );
 };
-

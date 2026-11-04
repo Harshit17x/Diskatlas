@@ -12,25 +12,32 @@ body {
   user-select: none;
   -webkit-user-select: none;
   overflow: hidden;
-  background-color: #020617; /* slate-950 */
+  background-color: #101114;
+  color: #F1F3F5;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
 }
 
-/* Custom scrollbar for modern desktop apps */
+/* Crisp, professional scrollbars for desktop */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: #101114;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #334155; /* slate-700 */
-  border-radius: 9999px;
+  background: #2D323A;
+  border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #475569; /* slate-600 */
+  background: #3B414C;
 }
 
+/* Keyboard focus rings */
+*:focus-visible {
+  outline: 2px solid #5687E8;
+  outline-offset: 1px;
+}

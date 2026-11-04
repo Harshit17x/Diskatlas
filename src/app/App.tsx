@@ -2,14 +2,22 @@ import React, { useEffect } from 'react';
 import { Header } from '../components/layout/Header';
 import { Sidebar } from '../components/layout/Sidebar';
 import { StatusBar } from '../components/layout/StatusBar';
+import { CommandPalette } from '../components/layout/CommandPalette';
 import { DashboardView } from '../features/dashboard/DashboardView';
-import { DriveList } from '../features/drives/DriveList';
+import { DriveExplorerView } from '../features/explorer/DriveExplorerView';
+import { StorageAnalysisView } from '../features/analysis/StorageAnalysisView';
+import { DeveloperStorageView } from '../features/developer/DeveloperStorageView';
+import { HiddenFilesView } from '../features/hidden/HiddenFilesView';
+import { ApplicationsView } from '../features/applications/ApplicationsView';
+import { DuplicateFinderView } from '../features/duplicates/DuplicateFinderView';
+import { CleanupCenterView } from '../features/cleanup/CleanupCenterView';
+import { StorageHistoryView } from '../features/history/StorageHistoryView';
+import { SettingsView } from '../features/settings/SettingsView';
 import { useUIStore } from '../stores/uiStore';
 import { useDriveStore } from '../stores/driveStore';
-import { HardDrive, AlertCircle } from 'lucide-react';
 
 export const App: React.FC = () => {
-  const { activeTab } = useUIStore();
+  const { activeTab, setActiveTab } = useUIStore();
   const { fetchDrives, fetchSystemInfo, fetchDbHealth } = useDriveStore();
 
   useEffect(() => {
@@ -18,58 +26,97 @@ export const App: React.FC = () => {
     fetchDbHealth();
   }, [fetchDrives, fetchSystemInfo, fetchDbHealth]);
 
+  // Global keyboard shortcuts (Cmd+1 to Cmd+9)
+  useEffect(() => {
+    const handleKeyNav = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey) {
+        switch (e.key) {
+          case '1':
+            e.preventDefault();
+            setActiveTab('dashboard');
+            break;
+          case '2':
+            e.preventDefault();
+            setActiveTab('explorer');
+            break;
+          case '3':
+            e.preventDefault();
+            setActiveTab('analysis');
+            break;
+          case '4':
+            e.preventDefault();
+            setActiveTab('developer');
+            break;
+          case '5':
+            e.preventDefault();
+            setActiveTab('hidden');
+            break;
+          case '6':
+            e.preventDefault();
+            setActiveTab('applications');
+            break;
+          case '7':
+            e.preventDefault();
+            setActiveTab('duplicates');
+            break;
+          case '8':
+            e.preventDefault();
+            setActiveTab('cleanup');
+            break;
+          case '9':
+            e.preventDefault();
+            setActiveTab('history');
+            break;
+          case ',':
+            e.preventDefault();
+            setActiveTab('settings');
+            break;
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyNav);
+    return () => window.removeEventListener('keydown', handleKeyNav);
+  }, [setActiveTab]);
+
   const renderContent = () => {
     switch (activeTab) {
       case 'dashboard':
         return <DashboardView />;
-      case 'drives':
-        return (
-          <div className="space-y-4">
-            <div>
-              <h2 className="text-lg font-semibold text-slate-100">All Connected Volumes</h2>
-              <p className="text-xs text-slate-400">View and inspect individual partitions</p>
-            </div>
-            <DriveList />
-          </div>
-        );
-      case 'large_files':
+      case 'explorer':
+        return <DriveExplorerView />;
+      case 'analysis':
+        return <StorageAnalysisView />;
+      case 'developer':
+        return <DeveloperStorageView />;
+      case 'hidden':
+        return <HiddenFilesView />;
+      case 'applications':
+        return <ApplicationsView />;
       case 'duplicates':
-      case 'recommendations':
+        return <DuplicateFinderView />;
+      case 'cleanup':
+        return <CleanupCenterView />;
+      case 'history':
+        return <StorageHistoryView />;
       case 'settings':
-        return (
-          <div className="flex flex-col items-center justify-center py-24 text-center">
-            <div className="w-12 h-12 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-center mb-3">
-              <HardDrive className="w-6 h-6 text-slate-500" />
-            </div>
-            <h3 className="text-sm font-semibold text-slate-300">
-              {activeTab.replace('_', ' ').toUpperCase()} Module
-            </h3>
-            <p className="text-xs text-slate-500 max-w-sm mt-1">
-              Scheduled for implementation in Phase 2 through Phase 5 according to the roadmap.
-            </p>
-          </div>
-        );
+        return <SettingsView />;
       default:
-        return (
-          <div className="p-4 text-center text-slate-500">
-            <AlertCircle className="w-6 h-6 mx-auto mb-2 text-amber-500" />
-            Unknown view requested.
-          </div>
-        );
+        return <DashboardView />;
     }
   };
 
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden bg-slate-950 text-slate-100">
+    <div className="flex flex-col h-screen w-screen overflow-hidden bg-canvas text-primary">
+      <CommandPalette />
       <Header />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
-        <main className="flex-1 overflow-y-auto p-6 bg-slate-950">
-          <div className="max-w-7xl mx-auto">{renderContent()}</div>
+        <main className="flex-1 overflow-y-auto p-5 bg-canvas">
+          <div className="max-w-6xl mx-auto">{renderContent()}</div>
         </main>
       </div>
       <StatusBar />
     </div>
   );
 };
-
