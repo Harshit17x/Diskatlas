@@ -64,6 +64,11 @@ impl DbPool {
     /// Count all user tables present in SQLite master
     pub fn count_tables(&self) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
+        Self::count_tables_with_conn(&conn)
+    }
+
+    /// Count tables using an existing connection reference without re-acquiring mutex
+    pub fn count_tables_with_conn(conn: &Connection) -> Result<usize> {
         let mut stmt = conn.prepare(
             "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
         )?;

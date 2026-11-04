@@ -63,3 +63,4 @@ DiskAtlas has undergone a comprehensive testing program validating scanner perfo
 - **Database Writes:** Buffered in batches of 5,000 files within single SQLite transactions, achieving >25,000 files/sec indexing on standard NVMe SSDs.
 - **Memory Footprint:** Peak RAM consumption during 500,000-file traversal bounded under **48 MB** due to bounded work stacks and streaming D3 tree depth aggregation.
 - **UI Responsiveness:** Tauri events throttled to 250ms intervals; 60 FPS sustained on frontend animations and chart drilldowns.
+

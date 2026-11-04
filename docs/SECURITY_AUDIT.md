@@ -80,3 +80,4 @@ Every cleanup action is permanently recorded in the SQLite database table `clean
 Error messages emitted across the Tauri IPC bridge are sanitized through [`src-tauri/src/error.rs`](file:///Users/harshitbisht/Desktop/DiskAtlas/src-tauri/src/error.rs):
 - Internal database paths, SQL query fragments, and memory addresses are never exposed to the frontend.
 - Standardized error codes (`DATABASE_ERROR`, `IO_ERROR`, `PERMISSION_DENIED`, `VALIDATION_FAILED`, `SECURITY_VIOLATION`) are returned with human-readable, safe descriptions.
+

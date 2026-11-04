@@ -113,3 +113,4 @@ DiskAtlas uses a customized NSIS package configured in [`src-tauri/tauri.conf.js
 - [x] Filesystem paths exceeding 260 characters (`MAX_PATH`) traversed successfully.
 - [x] Moving items to Windows Recycle Bin verified via native COM shell interface.
 - [x] SQLite WAL database verified crash-safe under unexpected termination.
+

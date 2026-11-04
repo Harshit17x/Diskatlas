@@ -9,7 +9,11 @@ pub async fn get_database_health(db: State<'_, DbPool>) -> Result<DatabaseHealth
     let conn = conn_arc.lock().unwrap();
 
     let migration_version = Migrator::current_version(&conn)?;
-    let tables_count = db.count_tables()?;
+    let tables_count: usize = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
     let db_path = db.db_path().to_string_lossy().to_string();
 
     Ok(DatabaseHealth {
@@ -19,5 +23,30 @@ pub async fn get_database_health(db: State<'_, DbPool>) -> Result<DatabaseHealth
         tables_count,
         message: Some("SQLite initialized with WAL mode enabled".into()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_database_health_and_count_tables_no_deadlock() {
+        let db = DbPool::new_in_memory().unwrap();
+        {
+            let conn_arc = db.conn();
+            let mut conn = conn_arc.lock().unwrap();
+            Migrator::run(&mut conn).unwrap();
+        }
+
+        // Verify count_tables runs without deadlock
+        let count = db.count_tables().unwrap();
+        assert!(count >= 16);
+
+        // Verify with pre-locked connection
+        let conn_arc = db.conn();
+        let conn = conn_arc.lock().unwrap();
+        let count_with_conn = DbPool::count_tables_with_conn(&conn).unwrap();
+        assert_eq!(count, count_with_conn);
+    }
 }
 
