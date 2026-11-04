@@ -4,5 +4,6 @@ pub mod database;
 pub mod developer;
 pub mod drive;
 pub mod history;
+pub mod intelligence;
 pub mod scan;
 pub mod system;

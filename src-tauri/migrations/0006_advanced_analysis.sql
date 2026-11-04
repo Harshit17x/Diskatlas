@@ -15,3 +15,4 @@ CREATE INDEX IF NOT EXISTS idx_file_hashes_size ON file_hashes(size_bytes);
 CREATE INDEX IF NOT EXISTS idx_file_hashes_sha ON file_hashes(sha256);
 CREATE INDEX IF NOT EXISTS idx_files_session_hidden ON files(session_id, is_hidden, is_system);
 CREATE INDEX IF NOT EXISTS idx_files_session_mod ON files(session_id, modified_at);
+

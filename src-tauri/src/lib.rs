@@ -25,6 +25,7 @@ use crate::commands::{
         compare_scans, create_manual_snapshot, delete_scan_session, get_scan_sessions,
         get_session_details, get_storage_snapshots,
     },
+    intelligence::{get_storage_intelligence, get_storage_recommendations},
     scanner::{cancel_scan, get_scan_files, get_scan_progress, pause_scan, resume_scan, start_scan},
     system::get_system_info,
 };
@@ -118,6 +119,8 @@ pub fn run() {
             find_duplicates,
             get_forgotten_files,
             get_unknown_storage,
+            get_storage_intelligence,
+            get_storage_recommendations,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DiskAtlas desktop application");

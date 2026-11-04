@@ -3,6 +3,7 @@ import {
   LayoutDashboard,
   HardDrive,
   PieChart,
+  Brain,
   Terminal,
   EyeOff,
   Box,
@@ -56,6 +57,14 @@ export const CommandPalette: React.FC = () => {
       icon: <PieChart className="w-4 h-4" />,
       shortcut: 'G A',
       onSelect: () => setActiveTab('analysis'),
+    },
+    {
+      id: 'nav-intelligence',
+      title: 'Go to Storage Intelligence',
+      category: 'Navigation',
+      icon: <Brain className="w-4 h-4" />,
+      shortcut: 'G I',
+      onSelect: () => setActiveTab('intelligence'),
     },
     {
       id: 'nav-developer',

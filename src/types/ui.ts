@@ -2,6 +2,7 @@ export type ActiveTab =
   | 'dashboard'
   | 'explorer'
   | 'analysis'
+  | 'intelligence'
   | 'developer'
   | 'hidden'
   | 'applications'

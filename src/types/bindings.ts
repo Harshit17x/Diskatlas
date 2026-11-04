@@ -496,3 +496,91 @@ export interface UnknownStorageResponse {
   topUnknownDirectories: UnknownStorageItem[];
 }
 
+// ==========================================
+// PHASE 9: STORAGE INTELLIGENCE TYPES
+// ==========================================
+
+export type RecommendationGroup =
+  | 'safe_to_review'
+  | 'review_required'
+  | 'system_protected'
+  | 'move_or_archive'
+  | 'uninstall_official';
+
+export type RiskLevel = 'none' | 'low' | 'moderate' | 'high' | 'critical';
+
+export interface StorageRecommendation {
+  id: string;
+  sessionId: string;
+  path: string;
+  name: string;
+  sizeBytes: number;
+  category: string;
+  group: RecommendationGroup;
+  riskLevel: RiskLevel;
+  reason: string;
+  confidence: number;
+  recoverableBytes: number;
+  expectedConsequences: string;
+  recommendedAction: string;
+  createdAt: string;
+}
+
+export interface StorageFinding {
+  id: string;
+  title: string;
+  description: string;
+  severity: 'info' | 'advisory' | 'warning';
+  impactBytes: number;
+  affectedItemsCount: number;
+  findingType: string;
+}
+
+export interface StorageConsumer {
+  path: string;
+  name: string;
+  sizeBytes: number;
+  category: string;
+  percentageOfUsed: number;
+  isDirectory: boolean;
+  explanation: string;
+}
+
+export interface GroupSummaryItem {
+  group: string;
+  count: number;
+  totalBytes: number;
+  recoverableBytes: number;
+}
+
+export interface StorageIntelligenceProfile {
+  sessionId: string;
+  driveId: string;
+  totalScannedBytes: number;
+  potentialReclaimableBytes: number;
+  safeReclaimableBytes: number;
+  reviewRequiredBytes: number;
+  systemProtectedBytes: number;
+  findings: StorageFinding[];
+  largestConsumers: StorageConsumer[];
+  groupSummaries: Record<string, GroupSummaryItem>;
+}
+
+export interface RecommendationsQuery {
+  sessionId?: string;
+  group?: string;
+  riskLevel?: string;
+  search?: string;
+  page: number;
+  pageSize: number;
+}
+
+export interface RecommendationsResponse {
+  items: StorageRecommendation[];
+  totalItems: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+

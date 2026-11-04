@@ -3,6 +3,7 @@ import {
   LayoutDashboard,
   HardDrive,
   PieChart,
+  Brain,
   Terminal,
   EyeOff,
   Box,
@@ -29,6 +30,7 @@ export const Sidebar: React.FC = () => {
     { id: 'analysis', label: 'Storage Analysis', category: 'core', shortcut: '⌘3' },
 
     // Intelligence
+    { id: 'intelligence', label: 'Storage Intelligence', category: 'intelligence' },
     { id: 'developer', label: 'Developer Storage', category: 'intelligence' },
     { id: 'hidden', label: 'Hidden Files', category: 'intelligence' },
     { id: 'applications', label: 'Applications', category: 'intelligence' },
@@ -48,6 +50,8 @@ export const Sidebar: React.FC = () => {
         return <HardDrive className="w-4 h-4" />;
       case 'analysis':
         return <PieChart className="w-4 h-4" />;
+      case 'intelligence':
+        return <Brain className="w-4 h-4" />;
       case 'developer':
         return <Terminal className="w-4 h-4" />;
       case 'hidden':

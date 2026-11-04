@@ -6,6 +6,7 @@ import { CommandPalette } from '../components/layout/CommandPalette';
 import { DashboardView } from '../features/dashboard/DashboardView';
 import { DriveExplorerView } from '../features/explorer/DriveExplorerView';
 import { StorageAnalysisView } from '../features/analysis/StorageAnalysisView';
+import { StorageIntelligenceView } from '../features/intelligence/StorageIntelligenceView';
 import { DeveloperStorageView } from '../features/developer/DeveloperStorageView';
 import { HiddenFilesView } from '../features/hidden/HiddenFilesView';
 import { ApplicationsView } from '../features/applications/ApplicationsView';
@@ -100,6 +101,8 @@ export const App: React.FC = () => {
         return <DriveExplorerView />;
       case 'analysis':
         return <StorageAnalysisView />;
+      case 'intelligence':
+        return <StorageIntelligenceView />;
       case 'developer':
         return <DeveloperStorageView />;
       case 'hidden':
