@@ -1,0 +1,27 @@
+# Node & Frontend
+node_modules
+dist
+dist-ssr
+*.local
+.env
+.env.*
+*.tsbuildinfo
+
+# Rust & Tauri
+src-tauri/target
+src-tauri/gen
+
+# Local database & state
+.diskatlas_data
+*.db
+*.db-shm
+*.db-wal
+
+# OS & Editors
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea
+*.log
