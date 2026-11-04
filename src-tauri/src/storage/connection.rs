@@ -25,11 +25,14 @@ impl DbPool {
 
         let conn = Connection::open(path)?;
 
-        // Configure SQLite performance and concurrency pragmas
+        // Configure SQLite performance, memory caching, and concurrency pragmas
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.pragma_update(None, "cache_size", -64000)?; // 64 MB page cache in memory
+        conn.pragma_update(None, "temp_store", "MEMORY")?; // Store temp tables & indexes in RAM
+        conn.pragma_update(None, "mmap_size", 268435456)?; // 256 MB memory-mapped I/O
 
         info!("SQLite connected at '{}' with WAL mode enabled", path.display());
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "DiskAtlas",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "identifier": "com.diskatlas.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -12,9 +12,9 @@
   "app": {
     "windows": [
       {
-        "title": "DiskAtlas",
-        "width": 1200,
-        "height": 800,
+        "title": "DiskAtlas - Storage Intelligence",
+        "width": 1280,
+        "height": 840,
         "minWidth": 960,
         "minHeight": 640,
         "resizable": true,
@@ -22,20 +22,33 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost",
       "capabilities": ["default"]
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis", "msi"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "category": "Utility",
+    "shortDescription": "Premium Local-First Storage Intelligence Desktop App",
+    "longDescription": "DiskAtlas is an ultra-fast, local-first disk intelligence desktop application engineered with Tauri 2, Rust, React 19, and SQLite. It provides deep filesystem analytics, developer storage profiling, duplicate discovery, and safe reversible cleanup without remote telemetry.",
+    "copyright": "Copyright © 2026 Harshit Bisht. All rights reserved.",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["en-US"],
+        "displayLanguageSelector": false
+      },
+      "wix": {
+        "language": "en-US"
+      }
+    }
   }
 }
-
