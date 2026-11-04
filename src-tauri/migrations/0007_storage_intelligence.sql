@@ -24,3 +24,4 @@ CREATE INDEX IF NOT EXISTS idx_recommendations_session ON storage_recommendation
 CREATE INDEX IF NOT EXISTS idx_recommendations_group ON storage_recommendations(session_id, rec_group);
 CREATE INDEX IF NOT EXISTS idx_recommendations_risk ON storage_recommendations(session_id, risk_level);
 CREATE INDEX IF NOT EXISTS idx_recommendations_size ON storage_recommendations(session_id, size_bytes DESC);
+

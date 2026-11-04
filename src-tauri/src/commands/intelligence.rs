@@ -25,3 +25,4 @@ pub async fn get_storage_recommendations(
     let conn = conn_arc.lock().unwrap();
     IntelligenceService::get_recommendations(&conn, query)
 }
+

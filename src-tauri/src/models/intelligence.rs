@@ -163,3 +163,4 @@ pub struct RecommendationsResponse {
     pub page_size: u32,
     pub total_pages: u32,
 }
+

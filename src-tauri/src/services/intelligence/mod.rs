@@ -829,3 +829,4 @@ mod tests {
         assert_eq!(build_rec.group, RecommendationGroup::SafeToReview);
     }
 }
+

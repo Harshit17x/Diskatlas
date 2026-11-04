@@ -1,10 +1,14 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useDriveStore } from '../../stores/driveStore';
 import { useScanStore } from '../../stores/scanStore';
+import { useVisualizationStore } from '../../stores/visualizationStore';
 import { Card } from '../../components/common/Card';
 import { Button } from '../../components/common/Button';
 import { Badge } from '../../components/common/Badge';
 import { DataTable } from '../../components/common/DataTable';
+import { TreemapChart } from '../../components/visualizations/TreemapChart';
+import { SunburstChart } from '../../components/visualizations/SunburstChart';
+import { StorageAnalyticsDashboard } from '../../components/visualizations/StorageAnalyticsDashboard';
 import { formatBytes, formatNumber } from '../../utils/formatters';
 import type { ColumnDef } from '@tanstack/react-table';
 import type { ScanFileItem } from '../../types/bindings';
@@ -23,6 +27,10 @@ import {
   Image,
   Video,
   Music,
+  LayoutGrid,
+  PieChart,
+  BarChart3,
+  Table,
 } from 'lucide-react';
 
 export const DriveExplorerView: React.FC = () => {
@@ -30,6 +38,7 @@ export const DriveExplorerView: React.FC = () => {
   const selectedDrive = drives.find((d) => d.id === selectedDriveId) || drives[0];
 
   const [currentPath, setCurrentPath] = useState(selectedDrive?.mountPoint || '/');
+  const [viewMode, setViewMode] = useState<'treemap' | 'sunburst' | 'analytics' | 'table'>('treemap');
 
   const {
     openScanModal,
@@ -43,6 +52,22 @@ export const DriveExplorerView: React.FC = () => {
     activeSessionId,
     summary,
   } = useScanStore();
+
+  const {
+    tree,
+    isLoadingTree,
+    breadcrumbs,
+    maxDepth,
+    fetchTree,
+    drillDown,
+    navigateUp,
+    resetDrilldown,
+    setMaxDepth,
+  } = useVisualizationStore();
+
+  useEffect(() => {
+    fetchTree(activeSessionId || undefined, currentPath);
+  }, [fetchTree, activeSessionId, currentPath]);
 
   const getFileCategoryIcon = (ext: string | null) => {
     if (!ext) return <File className="w-3.5 h-3.5 text-secondary flex-shrink-0" />;
@@ -98,17 +123,12 @@ export const DriveExplorerView: React.FC = () => {
             {row.original.name}
           </span>
           {row.original.isHidden && (
-            <Badge variant="neutral" size="sm">
+            <Badge variant="warning" size="sm">
               Hidden
             </Badge>
           )}
-          {row.original.isSymlink && (
-            <Badge variant="warning" size="sm">
-              Link
-            </Badge>
-          )}
           {row.original.isSystem && (
-            <Badge variant="accent" size="sm">
+            <Badge variant="danger" size="sm">
               System
             </Badge>
           )}
@@ -136,25 +156,15 @@ export const DriveExplorerView: React.FC = () => {
           onClick={() => handleSortChange('size')}
           className="flex items-center gap-1 hover:text-primary transition-colors text-xs font-semibold"
         >
-          <span>Logical Size</span>
+          <span>Size</span>
           <ArrowUpDown className="w-3 h-3 text-muted" />
         </button>
       ),
       cell: ({ getValue }) => (
-        <span className="text-accent font-mono font-medium">{formatBytes(Number(getValue()))}</span>
+        <span className="font-mono text-accent font-medium text-xs">
+          {formatBytes(Number(getValue()))}
+        </span>
       ),
-    },
-    {
-      accessorKey: 'allocatedBytes',
-      header: 'Allocated',
-      cell: ({ getValue }) => {
-        const val = getValue() as number | null;
-        return (
-          <span className="text-muted font-mono text-xs">
-            {val !== null ? formatBytes(val) : '—'}
-          </span>
-        );
-      },
     },
     {
       accessorKey: 'path',
@@ -191,12 +201,12 @@ export const DriveExplorerView: React.FC = () => {
 
   return (
     <div className="space-y-4">
-      {/* Top Header & Breadcrumb */}
+      {/* 1. Top Header & Volume Actions */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-border">
         <div>
-          <h1 className="text-base font-semibold text-primary">Drive Explorer</h1>
+          <h1 className="text-base font-semibold text-primary">Drive Explorer & Visualizer</h1>
           <p className="text-xs text-secondary mt-0.5">
-            Inspect directory structures, folder weights, and volume allocations
+            Interactive D3 Treemap, Sunburst concentric rings, and storage distribution analytics
           </p>
         </div>
 
@@ -223,7 +233,7 @@ export const DriveExplorerView: React.FC = () => {
         </div>
       </div>
 
-      {/* Selected Volume Card & Path Navigation */}
+      {/* 2. Target Volume Card */}
       <Card padding="md" className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
@@ -234,7 +244,10 @@ export const DriveExplorerView: React.FC = () => {
               onChange={(e) => {
                 selectDrive(e.target.value);
                 const d = drives.find((drv) => drv.id === e.target.value);
-                if (d) setCurrentPath(d.mountPoint);
+                if (d) {
+                  setCurrentPath(d.mountPoint);
+                  fetchTree(activeSessionId || undefined, d.mountPoint);
+                }
               }}
               className="bg-[#15171B] border border-border rounded px-2.5 py-1 text-xs text-primary font-mono focus:outline-none focus:border-accent"
             >
@@ -252,7 +265,7 @@ export const DriveExplorerView: React.FC = () => {
           </div>
         </div>
 
-        {/* Path Breadcrumbs */}
+        {/* Current Path Bar */}
         <div className="flex items-center justify-between px-3 py-2 bg-[#14161A] border border-border rounded text-xs font-mono text-secondary">
           <div className="flex items-center gap-1.5 truncate">
             <FolderTree className="w-3.5 h-3.5 text-muted flex-shrink-0" />
@@ -272,55 +285,150 @@ export const DriveExplorerView: React.FC = () => {
         </div>
       </Card>
 
-      {/* TanStack Table Data Area */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <h2 className="text-xs font-semibold text-primary uppercase tracking-wider">
-              Discovered File Registry
-            </h2>
-            {filePage && (
-              <Badge variant="neutral" size="sm">
-                {formatNumber(filePage.totalCount)} records
-              </Badge>
+      {/* 3. View Mode Switcher */}
+      <div className="flex items-center justify-between gap-2 border-b border-border pb-2">
+        <div className="flex items-center gap-1">
+          {[
+            { id: 'treemap', label: 'D3 Treemap', icon: <LayoutGrid className="w-3.5 h-3.5" /> },
+            { id: 'sunburst', label: 'D3 Sunburst', icon: <PieChart className="w-3.5 h-3.5" /> },
+            { id: 'analytics', label: 'Analytics Distribution', icon: <BarChart3 className="w-3.5 h-3.5" /> },
+            { id: 'table', label: 'File Registry Table', icon: <Table className="w-3.5 h-3.5" /> },
+          ].map((mode) => (
+            <button
+              key={mode.id}
+              onClick={() => setViewMode(mode.id as any)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded transition-colors ${
+                viewMode === mode.id
+                  ? 'bg-accent text-white font-medium'
+                  : 'text-secondary hover:text-primary hover:bg-[#1C1F25]'
+              }`}
+            >
+              {mode.icon}
+              <span>{mode.label}</span>
+            </button>
+          ))}
+        </div>
+
+        <span className="text-[11px] text-muted italic hidden sm:inline">
+          Database Aggregation • Zero Synthetic Data
+        </span>
+      </div>
+
+      {/* 4. Active Visualization / Table View */}
+      {viewMode === 'treemap' && (
+        <div>
+          {isLoadingTree ? (
+            <Card padding="lg" className="text-center py-12 space-y-2">
+              <RotateCw className="w-6 h-6 text-accent animate-spin mx-auto" />
+              <h3 className="text-sm font-semibold text-primary">Aggregating Treemap Hierarchy</h3>
+              <p className="text-xs text-muted max-w-sm mx-auto">
+                Computing database tile squarification and directory depth boundaries...
+              </p>
+            </Card>
+          ) : !tree ? (
+            <Card padding="lg" className="text-center py-12 space-y-2">
+              <LayoutGrid className="w-8 h-8 text-muted mx-auto" />
+              <h3 className="text-sm font-semibold text-primary">No Scan Tree Available</h3>
+              <p className="text-xs text-muted max-w-sm mx-auto">
+                Run a scan on this volume to generate the interactive Treemap.
+              </p>
+            </Card>
+          ) : (
+            <TreemapChart
+              data={tree}
+              onDrillDown={drillDown}
+              onNavigateUp={navigateUp}
+              onReset={resetDrilldown}
+              breadcrumbs={breadcrumbs}
+              maxDepth={maxDepth}
+              onSetMaxDepth={setMaxDepth}
+            />
+          )}
+        </div>
+      )}
+
+      {viewMode === 'sunburst' && (
+        <div>
+          {isLoadingTree ? (
+            <Card padding="lg" className="text-center py-12 space-y-2">
+              <RotateCw className="w-6 h-6 text-accent animate-spin mx-auto" />
+              <h3 className="text-sm font-semibold text-primary">Aggregating Sunburst Ring Partitions</h3>
+              <p className="text-xs text-muted max-w-sm mx-auto">
+                Calculating angular segments and concentric ring coordinates...
+              </p>
+            </Card>
+          ) : !tree ? (
+            <Card padding="lg" className="text-center py-12 space-y-2">
+              <PieChart className="w-8 h-8 text-muted mx-auto" />
+              <h3 className="text-sm font-semibold text-primary">No Scan Tree Available</h3>
+              <p className="text-xs text-muted max-w-sm mx-auto">
+                Run a scan on this volume to generate the Sunburst concentric rings.
+              </p>
+            </Card>
+          ) : (
+            <SunburstChart
+              data={tree}
+              onDrillDown={drillDown}
+              onNavigateUp={navigateUp}
+              onReset={resetDrilldown}
+              breadcrumbs={breadcrumbs}
+            />
+          )}
+        </div>
+      )}
+
+      {viewMode === 'analytics' && <StorageAnalyticsDashboard />}
+
+      {viewMode === 'table' && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <h2 className="text-xs font-semibold text-primary uppercase tracking-wider">
+                Discovered File Registry
+              </h2>
+              {filePage && (
+                <Badge variant="neutral" size="sm">
+                  {formatNumber(filePage.totalCount)} records
+                </Badge>
+              )}
+            </div>
+
+            {hasFiles && (
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-muted font-mono text-[11px]">
+                  Page {currentPage} of {filePage.totalPages || 1}
+                </span>
+                <div className="flex items-center gap-1">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    icon={<ChevronLeft className="w-3 h-3" />}
+                    onClick={() => handlePageChange(currentPage - 1)}
+                    disabled={currentPage <= 1 || isLoadingFiles}
+                  >
+                    Prev
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    icon={<ChevronRightIcon className="w-3 h-3" />}
+                    onClick={() => handlePageChange(currentPage + 1)}
+                    disabled={currentPage >= (filePage?.totalPages || 1) || isLoadingFiles}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
             )}
           </div>
 
-          {hasFiles && (
-            <div className="flex items-center gap-2 text-xs">
-              <span className="text-muted font-mono text-[11px]">
-                Page {currentPage} of {filePage.totalPages || 1}
-              </span>
-              <div className="flex items-center gap-1">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  icon={<ChevronLeft className="w-3 h-3" />}
-                  onClick={() => handlePageChange(currentPage - 1)}
-                  disabled={currentPage <= 1 || isLoadingFiles}
-                >
-                  Prev
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  icon={<ChevronRightIcon className="w-3 h-3" />}
-                  onClick={() => handlePageChange(currentPage + 1)}
-                  disabled={currentPage >= (filePage?.totalPages || 1) || isLoadingFiles}
-                >
-                  Next
-                </Button>
-              </div>
-            </div>
-          )}
+          <DataTable
+            columns={columns}
+            data={filePage?.items || []}
+            emptyMessage="No filesystem scan has been initiated yet. Click 'Scan Root Path' to trigger the Universal Filesystem Scanner."
+          />
         </div>
-
-        <DataTable
-          columns={columns}
-          data={filePage?.items || []}
-          emptyMessage="No filesystem scan has been initiated yet. Click 'Scan Root Path' to trigger the Phase 4 Universal Filesystem Scanner."
-        />
-      </div>
+      )}
     </div>
   );
 };

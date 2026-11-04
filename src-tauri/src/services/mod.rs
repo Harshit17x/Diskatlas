@@ -6,3 +6,4 @@ pub mod history;
 pub mod intelligence;
 pub mod scanner;
 pub mod system_inspector;
+pub mod visualization;

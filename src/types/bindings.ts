@@ -583,4 +583,68 @@ export interface RecommendationsResponse {
   totalPages: number;
 }
 
+// ==========================================
+// PHASE 10: STORAGE VISUALIZATION & ANALYTICS
+// ==========================================
+
+export interface HierarchicalNode {
+  name: string;
+  path: string;
+  value: number;
+  category: string | null;
+  isDirectory: boolean;
+  fileCount: number | null;
+  children?: HierarchicalNode[];
+}
+
+export interface HierarchicalQuery {
+  sessionId?: string;
+  rootPath?: string;
+  maxDepth?: number;
+  minBytesThreshold?: number;
+}
+
+export interface ExtensionDistItem {
+  extension: string;
+  fileCount: number;
+  totalBytes: number;
+  percentage: number;
+}
+
+export interface AppStorageItem {
+  appName: string;
+  fileCount: number;
+  totalBytes: number;
+  percentage: number;
+}
+
+export interface LargestDirItem {
+  path: string;
+  name: string;
+  totalBytes: number;
+  fileCount: number;
+  dirCount: number;
+  percentage: number;
+}
+
+export interface CategoryChartItem {
+  category: string;
+  fileCount: number;
+  totalBytes: number;
+  percentage: number;
+}
+
+export interface StorageAnalyticsData {
+  sessionId: string;
+  totalBytes: number;
+  totalFiles: number;
+  categoryDistribution: CategoryChartItem[];
+  extensionDistribution: ExtensionDistItem[];
+  largestDirectories: LargestDirItem[];
+  applicationStorage: AppStorageItem[];
+  developerStorage: DeveloperEcosystemSummary[];
+  historyTrends: StorageSnapshotRecord[];
+}
+
+
 
