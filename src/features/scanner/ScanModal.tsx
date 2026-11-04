@@ -476,3 +476,4 @@ export const ScanModal: React.FC = () => {
     </Modal>
   );
 };
+

@@ -39,6 +39,22 @@ impl ScanManager {
         }
     }
 
+    /// Marks any orphaned running/paused scan sessions from previous application crashes as interrupted.
+    pub fn recover_interrupted_scans(&self, db_pool: &DbPool) -> Result<usize> {
+        let conn_arc = db_pool.conn();
+        let conn = conn_arc.lock().unwrap();
+        let count = conn.execute(
+            "UPDATE scan_sessions
+             SET status = 'interrupted', completed_at = CURRENT_TIMESTAMP
+             WHERE status IN ('running', 'paused')",
+            [],
+        )?;
+        if count > 0 {
+            info!("Recovered {} orphaned/interrupted scan session(s)", count);
+        }
+        Ok(count)
+    }
+
     /// Starts a background recursive filesystem scan.
     pub fn start_scan(
         &self,
@@ -310,3 +326,4 @@ impl ScanManager {
         })
     }
 }
+

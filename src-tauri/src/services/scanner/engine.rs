@@ -456,6 +456,42 @@ impl ScanEngine {
                 session_id,
             ),
         )?;
+
+        // Automatically aggregate category summaries and create point-in-time snapshot on completion
+        if status == ScanStatus::Completed || status == ScanStatus::CompletedWithErrors {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO category_summaries (session_id, category, file_count, total_bytes)
+                 SELECT
+                     session_id,
+                     CASE
+                         WHEN is_system = 1 THEN 'system'
+                         WHEN extension IN ('rs', 'ts', 'tsx', 'js', 'jsx', 'py', 'go', 'c', 'cpp', 'h', 'hpp', 'java', 'cs', 'swift', 'kt', 'html', 'css', 'scss', 'json', 'yaml', 'yml', 'toml', 'xml', 'sql', 'sh', 'bash', 'zsh', 'bat', 'ps1') THEN 'code'
+                         WHEN extension IN ('pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'md', 'csv', 'tsv', 'rtf', 'epub', 'pages', 'numbers', 'key') THEN 'documents'
+                         WHEN extension IN ('png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'bmp', 'tiff', 'psd', 'ai', 'raw', 'heic') THEN 'images'
+                         WHEN extension IN ('mp4', 'mkv', 'mov', 'avi', 'wmv', 'flv', 'webm', 'm4v', 'mpg', 'mpeg') THEN 'videos'
+                         WHEN extension IN ('mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a', 'wma', 'aiff') THEN 'audio'
+                         WHEN extension IN ('zip', 'tar', 'gz', '7z', 'rar', 'bz2', 'xz', 'iso', 'dmg', 'pkg', 'tgz') THEN 'archives'
+                         WHEN extension IN ('exe', 'dll', 'msi', 'dylib', 'so', 'app', 'bin', 'elf') THEN 'executables'
+                         ELSE 'other'
+                     END AS category,
+                     COUNT(*) as file_count,
+                     COALESCE(SUM(size_bytes), 0) as total_bytes
+                 FROM files
+                 WHERE session_id = ?1
+                 GROUP BY category;",
+                [session_id],
+            );
+
+            let snapshot_id = uuid::Uuid::new_v4().to_string();
+            let _ = conn.execute(
+                "INSERT INTO storage_snapshots (id, session_id, drive_id, label, root_path, total_files, total_directories, total_bytes)
+                 SELECT ?1, s.id, s.drive_id, 'Scan Completed', s.root_path, s.total_files, s.total_directories, s.total_bytes
+                 FROM scan_sessions s
+                 WHERE s.id = ?2;",
+                (&snapshot_id, session_id),
+            );
+        }
+
         Ok(())
     }
 

@@ -12,6 +12,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 use crate::commands::{
     database::get_database_health,
     drives::{get_drive_details, get_drives, list_drives},
+    history::{
+        compare_scans, create_manual_snapshot, delete_scan_session, get_scan_sessions,
+        get_session_details, get_storage_snapshots,
+    },
     scanner::{cancel_scan, get_scan_files, get_scan_progress, pause_scan, resume_scan, start_scan},
     system::get_system_info,
 };
@@ -64,8 +68,12 @@ pub fn run() {
             }
 
             // 5. Store DB pool and Scanner Manager into Tauri managed state for command handlers
+            let scan_manager = ScanManager::new();
+            // Automatically recover any orphaned/interrupted scans from previous unclean shutdowns
+            let _ = scan_manager.recover_interrupted_scans(&db_pool);
+
             app.manage(db_pool);
-            app.manage(ScanManager::new());
+            app.manage(scan_manager);
 
             Ok(())
         })
@@ -81,6 +89,12 @@ pub fn run() {
             cancel_scan,
             get_scan_progress,
             get_scan_files,
+            get_scan_sessions,
+            get_session_details,
+            delete_scan_session,
+            get_storage_snapshots,
+            create_manual_snapshot,
+            compare_scans,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DiskAtlas desktop application");

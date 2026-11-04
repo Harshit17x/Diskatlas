@@ -44,3 +44,4 @@ pub struct RawErrorItem {
     pub error_type: String,
     pub message: String,
 }
+

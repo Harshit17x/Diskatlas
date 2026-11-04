@@ -24,6 +24,9 @@ pub enum AppError {
 
     #[error("Migration error: {0}")]
     Migration(String),
+
+    #[error("Item not found: {0}")]
+    NotFound(String),
 }
 
 impl Serialize for AppError {
@@ -41,6 +44,7 @@ impl Serialize for AppError {
             AppError::PermissionDenied(_) => "PERMISSION_DENIED",
             AppError::System(_) => "SYSTEM_ERROR",
             AppError::Migration(_) => "MIGRATION_ERROR",
+            AppError::NotFound(_) => "NOT_FOUND",
         };
 
         state.serialize_field("code", code)?;

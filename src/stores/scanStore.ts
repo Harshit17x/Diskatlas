@@ -281,3 +281,4 @@ export const useScanStore = create<ScanState>((set, get) => ({
     };
   },
 }));
+

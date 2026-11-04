@@ -58,3 +58,4 @@ pub async fn get_scan_files(
     let ps = page_size.unwrap_or(50);
     manager.get_files(&session_id, p, ps, parent_path, sort_by, sort_desc, &db)
 }
+

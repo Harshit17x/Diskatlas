@@ -74,7 +74,8 @@ export type ScanStatus =
   | 'completed'
   | 'completedWithErrors'
   | 'cancelled'
-  | 'failed';
+  | 'failed'
+  | 'interrupted';
 
 export interface ScanProgress {
   sessionId: string;
@@ -123,4 +124,112 @@ export interface ScanSummary {
   totalBytes: number;
   errorCount: number;
   durationMillis: number;
+}
+
+export interface ScanSessionRecord {
+  id: string;
+  driveId: string;
+  driveLabel: string | null;
+  rootPath: string;
+  status: ScanStatus;
+  totalFiles: number;
+  totalDirectories: number;
+  totalBytes: number;
+  errorCount: number;
+  startedAt: string;
+  completedAt: string | null;
+  durationMillis: number | null;
+}
+
+export interface ScanSessionPage {
+  items: ScanSessionRecord[];
+  totalCount: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+export interface CategorySummaryItem {
+  category: string;
+  fileCount: number;
+  totalBytes: number;
+  percentageBytes: number;
+}
+
+export interface DirectoryRecord {
+  path: string;
+  name: string;
+  totalSizeBytes: number;
+  fileCount: number;
+  dirCount: number;
+}
+
+export interface ScanErrorItem {
+  path: string;
+  errorType: string;
+  message: string;
+  occurredAt: string;
+}
+
+export interface StorageSnapshotRecord {
+  id: string;
+  sessionId: string | null;
+  driveId: string;
+  label: string;
+  rootPath: string;
+  totalFiles: number;
+  totalDirectories: number;
+  totalBytes: number;
+  createdAt: string;
+}
+
+export interface SessionDetails {
+  session: ScanSessionRecord;
+  categories: CategorySummaryItem[];
+  topDirectories: DirectoryRecord[];
+  errorSamples: ScanErrorItem[];
+}
+
+export interface CategoryDeltaItem {
+  category: string;
+  baselineBytes: number;
+  targetBytes: number;
+  deltaBytes: number;
+  baselineFiles: number;
+  targetFiles: number;
+  deltaFiles: number;
+}
+
+export interface DirectoryDeltaItem {
+  path: string;
+  baselineSizeBytes: number;
+  targetSizeBytes: number;
+  deltaBytes: number;
+}
+
+export interface FileModifiedItem {
+  path: string;
+  name: string;
+  extension: string | null;
+  baselineSizeBytes: number;
+  targetSizeBytes: number;
+  sizeDeltaBytes: number;
+  modifiedAt: number | null;
+}
+
+export interface ScanComparisonResult {
+  baselineSession: ScanSessionRecord;
+  targetSession: ScanSessionRecord;
+  sizeDeltaBytes: number;
+  filesDelta: number;
+  directoriesDelta: number;
+  durationDeltaMillis: number | null;
+  categoryDeltas: CategoryDeltaItem[];
+  directoryDeltas: DirectoryDeltaItem[];
+  addedFilesCount: number;
+  removedFilesCount: number;
+  modifiedFilesCount: number;
+  addedFilesSample: ScanFileItem[];
+  removedFilesSample: ScanFileItem[];
+  modifiedFilesSample: FileModifiedItem[];
 }

@@ -10,6 +10,7 @@ pub enum ScanStatus {
     CompletedWithErrors,
     Cancelled,
     Failed,
+    Interrupted,
 }
 
 impl ScanStatus {
@@ -22,6 +23,7 @@ impl ScanStatus {
             ScanStatus::CompletedWithErrors => "completed_with_errors",
             ScanStatus::Cancelled => "cancelled",
             ScanStatus::Failed => "failed",
+            ScanStatus::Interrupted => "interrupted",
         }
     }
 }
@@ -82,3 +84,4 @@ pub struct ScanSummary {
     pub error_count: u64,
     pub duration_millis: u64,
 }
+

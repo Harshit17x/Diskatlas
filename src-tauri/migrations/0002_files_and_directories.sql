@@ -53,3 +53,4 @@ CREATE INDEX IF NOT EXISTS idx_files_session_ext ON files(session_id, extension)
 CREATE INDEX IF NOT EXISTS idx_dirs_session_parent ON directories(session_id, parent_path);
 CREATE INDEX IF NOT EXISTS idx_dirs_session_size ON directories(session_id, total_size_bytes DESC);
 CREATE INDEX IF NOT EXISTS idx_scan_errors_session ON scan_errors(session_id);
+
