@@ -7,12 +7,14 @@ import {
   Network,
   Disc,
   Info,
+  Play,
 } from 'lucide-react';
 import type { DriveInfo, DriveType } from '../../types/bindings';
 import { formatBytes, formatPercent } from '../../utils/formatters';
 import { Card } from '../../components/common/Card';
 import { Badge } from '../../components/common/Badge';
 import { useDriveStore } from '../../stores/driveStore';
+import { useScanStore } from '../../stores/scanStore';
 
 export interface DriveCardProps {
   drive: DriveInfo;
@@ -168,17 +170,32 @@ export const DriveCard: React.FC<DriveCardProps> = ({
         </div>
       </div>
 
-      {/* Inspect button footer */}
+      {/* Action buttons footer */}
       <div className="mt-3 pt-2 border-t border-border flex items-center justify-between text-[11px]">
-        <span className="text-muted font-mono">Mount: {drive.mountPoint}</span>
-        <button
-          onClick={handleInspect}
-          className="text-accent hover:text-accent-hover font-medium flex items-center gap-1 transition-colors"
-          title="Inspect low-level volume diagnostics"
-        >
-          <Info className="w-3 h-3" />
-          <span>Diagnostics</span>
-        </button>
+        <span className="text-muted font-mono truncate max-w-[130px]" title={drive.mountPoint}>
+          {drive.mountPoint}
+        </span>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              useScanStore.getState().openScanModal(drive.mountPoint, drive.id);
+            }}
+            className="text-primary hover:text-accent font-medium flex items-center gap-1 transition-colors"
+            title="Scan this drive"
+          >
+            <Play className="w-3 h-3 text-accent" />
+            <span>Scan</span>
+          </button>
+          <button
+            onClick={handleInspect}
+            className="text-secondary hover:text-primary font-medium flex items-center gap-1 transition-colors"
+            title="Inspect low-level volume diagnostics"
+          >
+            <Info className="w-3 h-3" />
+            <span>Diagnostics</span>
+          </button>
+        </div>
       </div>
     </Card>
   );

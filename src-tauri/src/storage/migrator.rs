@@ -14,6 +14,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0001_initial_schema",
         sql: include_str!("../../migrations/0001_initial_schema.sql"),
     },
+    Migration {
+        version: 2,
+        name: "0002_files_and_directories",
+        sql: include_str!("../../migrations/0002_files_and_directories.sql"),
+    },
 ];
 
 pub struct Migrator;
@@ -115,17 +120,17 @@ mod tests {
     fn test_migrations_apply_cleanly_on_empty_db() {
         let mut conn = Connection::open_in_memory().unwrap();
         let version = Migrator::run(&mut conn).unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
 
         // Verify tables were created
         let tables_count: i64 = conn
             .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ('drives', 'scan_sessions', 'app_settings', '_migrations')",
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ('drives', 'scan_sessions', 'app_settings', 'files', 'directories', 'scan_errors', '_migrations')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(tables_count, 4);
+        assert_eq!(tables_count, 7);
     }
 
     #[test]

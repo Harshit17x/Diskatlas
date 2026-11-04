@@ -4,6 +4,7 @@ use rusqlite::Connection;
 use tracing::info;
 use crate::error::{AppError, Result};
 
+#[derive(Clone)]
 pub struct DbPool {
     conn: Arc<Mutex<Connection>>,
     db_path: PathBuf,

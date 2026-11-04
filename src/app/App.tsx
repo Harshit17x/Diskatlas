@@ -14,18 +14,30 @@ import { CleanupCenterView } from '../features/cleanup/CleanupCenterView';
 import { StorageHistoryView } from '../features/history/StorageHistoryView';
 import { SettingsView } from '../features/settings/SettingsView';
 import { DriveDetailsModal } from '../features/drives/DriveDetailsModal';
+import { ScanModal } from '../features/scanner/ScanModal';
 import { useUIStore } from '../stores/uiStore';
 import { useDriveStore } from '../stores/driveStore';
+import { useScanStore } from '../stores/scanStore';
 
 export const App: React.FC = () => {
   const { activeTab, setActiveTab } = useUIStore();
   const { fetchDrives, fetchSystemInfo, fetchDbHealth } = useDriveStore();
+  const { setupEventListeners } = useScanStore();
 
   useEffect(() => {
     fetchDrives();
     fetchSystemInfo();
     fetchDbHealth();
-  }, [fetchDrives, fetchSystemInfo, fetchDbHealth]);
+
+    let cleanup: (() => void) | undefined;
+    setupEventListeners().then((unlisten) => {
+      cleanup = unlisten;
+    });
+
+    return () => {
+      cleanup?.();
+    };
+  }, [fetchDrives, fetchSystemInfo, fetchDbHealth, setupEventListeners]);
 
   // Global keyboard shortcuts (Cmd+1 to Cmd+9)
   useEffect(() => {
@@ -111,6 +123,7 @@ export const App: React.FC = () => {
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-canvas text-primary">
       <CommandPalette />
       <DriveDetailsModal />
+      <ScanModal />
       <Header />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />

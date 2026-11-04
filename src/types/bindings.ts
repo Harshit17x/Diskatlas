@@ -66,3 +66,61 @@ export interface AppError {
   message: string;
   details?: string;
 }
+
+export type ScanStatus =
+  | 'queued'
+  | 'running'
+  | 'paused'
+  | 'completed'
+  | 'completedWithErrors'
+  | 'cancelled'
+  | 'failed';
+
+export interface ScanProgress {
+  sessionId: string;
+  driveId: string;
+  rootPath: string;
+  status: ScanStatus;
+  filesScanned: number;
+  dirsScanned: number;
+  bytesScanned: number;
+  errorCount: number;
+  currentPath: string;
+  elapsedMillis: number;
+}
+
+export interface ScanFileItem {
+  id: number;
+  sessionId: string;
+  path: string;
+  name: string;
+  extension: string | null;
+  parentPath: string;
+  sizeBytes: number;
+  allocatedBytes: number | null;
+  createdAt: number | null;
+  modifiedAt: number | null;
+  isHidden: boolean;
+  isSystem: boolean;
+  isSymlink: boolean;
+}
+
+export interface ScanFilePage {
+  items: ScanFileItem[];
+  totalCount: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+export interface ScanSummary {
+  sessionId: string;
+  driveId: string;
+  rootPath: string;
+  status: ScanStatus;
+  totalFiles: number;
+  totalDirs: number;
+  totalBytes: number;
+  errorCount: number;
+  durationMillis: number;
+}

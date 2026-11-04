@@ -12,8 +12,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 use crate::commands::{
     database::get_database_health,
     drives::{get_drive_details, get_drives, list_drives},
+    scanner::{cancel_scan, get_scan_files, get_scan_progress, pause_scan, resume_scan, start_scan},
     system::get_system_info,
 };
+use crate::services::scanner::ScanManager;
 use crate::storage::{migrator::Migrator, DbPool};
 
 pub fn run() {
@@ -61,8 +63,9 @@ pub fn run() {
                 info!("Database initialized at schema version {}", latest_version);
             }
 
-            // 5. Store DB pool into Tauri managed state for command handlers
+            // 5. Store DB pool and Scanner Manager into Tauri managed state for command handlers
             app.manage(db_pool);
+            app.manage(ScanManager::new());
 
             Ok(())
         })
@@ -72,6 +75,12 @@ pub fn run() {
             get_drive_details,
             list_drives,
             get_database_health,
+            start_scan,
+            pause_scan,
+            resume_scan,
+            cancel_scan,
+            get_scan_progress,
+            get_scan_files,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DiskAtlas desktop application");
