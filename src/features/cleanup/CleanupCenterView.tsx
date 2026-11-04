@@ -1,18 +1,19 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { Card } from '../../components/common/Card';
 import { Button } from '../../components/common/Button';
 import { Badge } from '../../components/common/Badge';
 import { Tabs } from '../../components/common/Tabs';
 import { DataTable } from '../../components/common/DataTable';
 import type { ColumnDef } from '@tanstack/react-table';
-import type { ForgottenFileItem } from '../../types/bindings';
+import type { ForgottenFileItem, CleanupAuditRecord, CleanupItemCandidate } from '../../types/bindings';
+import { useCleanupStore } from '../../stores/cleanupStore';
 import { useAdvancedAnalysisStore } from '../../stores/advancedAnalysisStore';
 import { useHistoryStore } from '../../stores/historyStore';
-import { formatBytes, formatNumber } from '../../utils/formatters';
+import { formatBytes } from '../../utils/formatters';
+import { CleanupConfirmationModal } from '../../components/cleanup/CleanupConfirmationModal';
+import { CleanupResultsBanner } from '../../components/cleanup/CleanupResultsBanner';
 import {
-  ShieldCheck,
   CheckCircle2,
-  AlertTriangle,
   RotateCw,
   Clock,
   Archive,
@@ -23,23 +24,43 @@ import {
   ChevronLeft,
   ChevronRight,
   Info,
+  Trash2,
+  ShieldAlert,
+  Search,
+  CloudOff,
+  Filter,
+  CheckSquare,
+  Square,
+  Lock,
 } from 'lucide-react';
 
-interface Recommendation {
-  id: string;
-  title: string;
-  category: 'Developer' | 'System' | 'Applications';
-  safetyLevel: 'Safe' | 'Review Required';
-  estimatedSavings: string;
-  reason: string;
-}
-
 export const CleanupCenterView: React.FC = () => {
-  const [activeTab, setActiveTab] = useState('forgotten');
+  const [activeTab, setActiveTab] = useState('plan');
+
+  const {
+    cleanupPlan,
+    loadingPlan,
+    fetchCleanupPlan,
+    selectedIds,
+    toggleCandidateSelection,
+    selectAllSafe,
+    deselectAll,
+    groupFilter,
+    setGroupFilter,
+    riskFilter,
+    setRiskFilter,
+    searchQuery,
+    setSearchQuery,
+    setConfirmationModalOpen,
+    auditRecords,
+    auditTotalItems,
+    auditPage,
+    auditTotalPages,
+    fetchAuditHistory,
+  } = useCleanupStore();
 
   const {
     forgottenFiles,
-    forgottenFilesLoading,
     forgottenFilesQuery,
     setForgottenFilesQuery,
     fetchForgottenFiles,
@@ -51,27 +72,63 @@ export const CleanupCenterView: React.FC = () => {
 
   useEffect(() => {
     fetchSessions(1, 20);
+    fetchAuditHistory(1);
     fetchForgottenFiles();
-  }, [fetchSessions, fetchForgottenFiles]);
+  }, [fetchSessions, fetchAuditHistory, fetchForgottenFiles]);
+
+  // Load cleanup plan when active session is determined or changed
+  useEffect(() => {
+    const sid = selectedSessionId || (sessionsPage?.items[0]?.id ?? null);
+    if (sid) {
+      fetchCleanupPlan(sid);
+    }
+  }, [selectedSessionId, sessionsPage, fetchCleanupPlan]);
 
   const handleSessionChange = (sid: string) => {
     setSelectedSessionId(sid || null);
-    fetchForgottenFiles(sid || undefined);
+    if (sid) {
+      fetchCleanupPlan(sid);
+      fetchForgottenFiles(sid);
+    }
   };
 
-  const handleAgeChange = (days: number) => {
-    setForgottenFilesQuery({ minAgeDays: days, page: 1 });
-    fetchForgottenFiles();
-  };
+  // Filter candidates based on group, risk, and search query
+  const filteredCandidates = useMemo(() => {
+    if (!cleanupPlan) return [];
+    return cleanupPlan.candidates.filter((c) => {
+      // Group filter
+      if (groupFilter === 'safe_to_review' && c.group !== 'safe_to_review') return false;
+      if (groupFilter === 'review_required' && c.group !== 'review_required') return false;
+      if (groupFilter === 'system_protected' && !c.isBlocked) return false;
 
-  const handleSignalChange = (signal: string) => {
-    setForgottenFilesQuery({
-      signalType: signal === 'all' ? undefined : signal,
-      page: 1,
+      // Risk filter
+      if (riskFilter !== 'all' && c.riskLevel !== riskFilter) return false;
+
+      // Search query
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        return (
+          c.name.toLowerCase().includes(q) ||
+          c.path.toLowerCase().includes(q) ||
+          c.category.toLowerCase().includes(q) ||
+          c.reason.toLowerCase().includes(q)
+        );
+      }
+      return true;
     });
-    fetchForgottenFiles();
-  };
+  }, [cleanupPlan, groupFilter, riskFilter, searchQuery]);
 
+  // Selected candidates stats
+  const selectedCandidates = useMemo(() => {
+    if (!cleanupPlan) return [];
+    return cleanupPlan.candidates.filter((c) => selectedIds.has(c.id));
+  }, [cleanupPlan, selectedIds]);
+
+  const selectedBytes = useMemo(() => {
+    return selectedCandidates.reduce((acc, c) => acc + c.sizeBytes, 0);
+  }, [selectedCandidates]);
+
+  // Forgotten files heuristics table columns
   const getSignalBadge = (signal: string) => {
     switch (signal) {
       case 'old_download':
@@ -159,294 +216,513 @@ export const CleanupCenterView: React.FC = () => {
     },
   ];
 
-  const recommendations: Recommendation[] = [
+  // Audit table columns
+  const auditColumns: ColumnDef<CleanupAuditRecord>[] = [
     {
-      id: 'rec-1',
-      title: 'Stale node_modules (> 60 days unaccessed)',
-      category: 'Developer',
-      safetyLevel: 'Safe',
-      estimatedSavings: 'Review in Developer Storage tab',
-      reason: 'Can be reinstalled at any time via npm install / pnpm install',
+      accessorKey: 'createdAt',
+      header: 'Timestamp',
+      cell: ({ getValue }) => (
+        <span className="font-mono text-secondary text-xs">{String(getValue())}</span>
+      ),
     },
     {
-      id: 'rec-2',
-      title: 'Rust / Cargo incremental target directories',
-      category: 'Developer',
-      safetyLevel: 'Safe',
-      estimatedSavings: 'Review in Developer Storage tab',
-      reason: 'Recompilable build caches',
-    },
-    {
-      id: 'rec-3',
-      title: 'System temporary log dumps & crash reports',
-      category: 'System',
-      safetyLevel: 'Safe',
-      estimatedSavings: 'Review in Hidden & System tab',
-      reason: 'Expired diagnostic traces older than 14 days',
-    },
-    {
-      id: 'rec-4',
-      title: 'User Trash / Recycle Bin contents',
-      category: 'System',
-      safetyLevel: 'Review Required',
-      estimatedSavings: 'Review in Explorer tab',
-      reason: 'User deleted items waiting for permanent purge',
-    },
-  ];
-
-  const recColumns: ColumnDef<Recommendation>[] = [
-    {
-      accessorKey: 'title',
-      header: 'Optimization Recommendation',
+      accessorKey: 'name',
+      header: 'Item & Location',
       cell: ({ row }) => (
-        <div>
-          <span className="font-semibold text-primary">{row.original.title}</span>
-          <p className="text-[11px] text-secondary mt-0.5">{row.original.reason}</p>
+        <div className="space-y-0.5 max-w-sm">
+          <span className="font-semibold text-primary text-xs block truncate">{row.original.name}</span>
+          <span className="font-mono text-[10px] text-muted block truncate" title={row.original.path}>
+            {row.original.path}
+          </span>
         </div>
       ),
     },
     {
-      accessorKey: 'category',
-      header: 'Category',
-      cell: ({ getValue }) => <Badge variant="neutral" size="sm">{String(getValue())}</Badge>,
+      accessorKey: 'sizeBytes',
+      header: 'Reclaimed',
+      cell: ({ getValue }) => (
+        <span className="font-mono text-accent text-xs font-semibold">
+          {formatBytes(Number(getValue()))}
+        </span>
+      ),
     },
     {
-      accessorKey: 'safetyLevel',
-      header: 'Safety Level',
+      accessorKey: 'cleanupMethod',
+      header: 'Method',
       cell: ({ getValue }) => (
-        <Badge
-          variant={getValue() === 'Safe' ? 'success' : 'warning'}
-          size="sm"
-          icon={getValue() === 'Safe' ? <CheckCircle2 className="w-3 h-3 text-success" /> : <AlertTriangle className="w-3 h-3 text-warning" />}
-        >
-          {String(getValue())}
+        <Badge variant={getValue() === 'recycle_bin' ? 'success' : 'neutral'} size="sm">
+          {getValue() === 'recycle_bin' ? 'Recycle Bin' : 'Permanent'}
         </Badge>
       ),
     },
     {
-      accessorKey: 'estimatedSavings',
-      header: 'Audit Location',
-      cell: ({ getValue }) => <span className="text-secondary text-xs">{String(getValue())}</span>,
+      accessorKey: 'status',
+      header: 'Status',
+      cell: ({ row }) => {
+        const s = row.original.status;
+        if (s === 'success') {
+          return (
+            <Badge variant="success" size="sm" icon={<CheckCircle2 className="w-3 h-3 text-success" />}>
+              Success
+            </Badge>
+          );
+        }
+        if (s === 'blocked_security') {
+          return (
+            <Badge variant="warning" size="sm" icon={<ShieldAlert className="w-3 h-3 text-warning" />}>
+              Security Blocked
+            </Badge>
+          );
+        }
+        if (s === 'permission_denied') {
+          return (
+            <Badge variant="danger" size="sm" icon={<Lock className="w-3 h-3 text-[#DB6262]" />}>
+              Permission Denied
+            </Badge>
+          );
+        }
+        return (
+          <Badge variant="neutral" size="sm">
+            {s.replace('_', ' ')}
+          </Badge>
+        );
+      },
+    },
+    {
+      accessorKey: 'isReversible',
+      header: 'Reversible',
+      cell: ({ getValue }) => (
+        <span className={`text-[11px] font-mono ${getValue() ? 'text-success' : 'text-muted'}`}>
+          {getValue() ? 'Yes (Recycle Bin)' : 'No'}
+        </span>
+      ),
     },
   ];
 
+  const getRiskBadge = (risk: string) => {
+    switch (risk) {
+      case 'none':
+      case 'low':
+        return <Badge variant="success" size="sm">Low Risk</Badge>;
+      case 'moderate':
+        return <Badge variant="warning" size="sm">Moderate Risk</Badge>;
+      case 'high':
+      case 'critical':
+        return <Badge variant="danger" size="sm">High Risk</Badge>;
+      default:
+        return <Badge variant="neutral" size="sm">{risk}</Badge>;
+    }
+  };
+
   return (
-    <div className="space-y-4">
-      {/* 1. Header */}
+    <div className="space-y-4 pb-12">
+      {/* 1. Header & Session Selector */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-border">
         <div>
-          <h1 className="text-base font-semibold text-primary">Storage Optimization & Forgotten Files</h1>
+          <h1 className="text-base font-semibold text-primary">Safe Cleanup Center</h1>
           <p className="text-xs text-secondary mt-0.5">
-            Identify old downloads, standalone installers, stale archives, and forgotten project build trees
+            Transparent, user-controlled storage cleanup with Windows Recycle Bin protection and audit history
           </p>
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Target Session Selector */}
           <select
             value={selectedSessionId || ''}
             onChange={(e) => handleSessionChange(e.target.value)}
             className="bg-[#15171B] border border-border rounded px-2.5 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
           >
-            <option value="">Latest Completed Scan</option>
-            {sessionsPage?.items.map((s) => (
-              <option key={s.id} value={s.id}>
-                Session {s.id.slice(0, 8)} ({s.driveId} • {formatBytes(s.totalBytes)})
+            {sessionsPage?.items.map((session) => (
+              <option key={session.id} value={session.id}>
+                Session {session.id.slice(0, 8)} ({session.driveId} - {session.status})
               </option>
             ))}
           </select>
 
           <Button
-            variant="secondary"
+            variant="ghost"
             size="sm"
-            icon={<RotateCw className={`w-3.5 h-3.5 ${forgottenFilesLoading ? 'animate-spin' : ''}`} />}
-            onClick={() => fetchForgottenFiles()}
-            disabled={forgottenFilesLoading}
+            onClick={() => {
+              if (selectedSessionId) fetchCleanupPlan(selectedSessionId);
+              fetchAuditHistory(1);
+            }}
+            icon={<RotateCw className="w-3.5 h-3.5" />}
           >
             Refresh
           </Button>
         </div>
       </div>
 
-      {/* 2. Safety Philosophy Notice */}
-      <div className="p-3 bg-[#16181C] border border-border rounded flex items-start gap-2.5 text-xs text-secondary">
-        <Info className="w-4 h-4 text-accent shrink-0 mt-0.5" />
-        <div className="space-y-0.5 text-[11px] leading-relaxed">
-          <span className="font-semibold text-primary block">Crucial Heuristic Principle:</span>
-          <p>
-            Age is only a signal, <strong className="text-primary font-semibold">not proof</strong> that a file is unnecessary.
-            DiskAtlas operates strictly in non-destructive, read-only mode during analysis. No automated deletions or silent sweeps will ever be performed.
-          </p>
-        </div>
-      </div>
+      {/* Execution Results Banner */}
+      <CleanupResultsBanner />
 
-      {/* 3. Tabs */}
+      {/* 2. Primary Tabs */}
       <Tabs
         tabs={[
-          { id: 'forgotten', label: `Forgotten Files (${formatNumber(forgottenFiles?.totalItems ?? 0)})` },
-          { id: 'blueprints', label: 'Optimization Blueprints' },
+          { id: 'plan', label: 'Cleanup Plan & Recommendations', count: cleanupPlan?.totalItems },
+          { id: 'audit', label: 'Cleanup Audit History', count: auditTotalItems },
+          { id: 'forgotten', label: 'Forgotten Files Heuristics', count: forgottenFiles?.totalItems },
         ]}
         activeTab={activeTab}
         onChange={setActiveTab}
       />
 
-      {/* Tab 1: Forgotten Files */}
-      {activeTab === 'forgotten' && (
+      {/* TAB 1: CLEANUP PLAN */}
+      {activeTab === 'plan' && (
         <div className="space-y-4">
-          {/* Metrics */}
-          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-            <Card padding="md">
-              <span className="text-[11px] text-muted uppercase font-semibold">Stale Storage</span>
-              <div className="text-xl font-bold font-mono text-warning mt-1">
-                {formatBytes(forgottenFiles?.totalBytes ?? 0)}
+          {/* Metrics summary cards */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <Card className="p-3">
+              <span className="text-[11px] text-secondary uppercase font-mono">Safe to Review</span>
+              <div className="text-base font-bold text-success mt-1">
+                {cleanupPlan?.safeItems ?? 0} items
               </div>
-              <span className="text-[11px] text-muted font-mono">{formatNumber(forgottenFiles?.totalItems ?? 0)} items identified</span>
-            </Card>
-
-            <Card padding="md">
-              <span className="text-[11px] text-muted uppercase font-semibold">Age Threshold</span>
-              <div className="text-xl font-bold font-mono text-primary mt-1">
-                ≥ {forgottenFilesQuery.minAgeDays ?? 90} Days
+              <div className="text-[11px] text-muted font-mono mt-0.5">
+                {formatBytes(cleanupPlan?.safeBytes ?? 0)}
               </div>
-              <span className="text-[11px] text-muted">Unmodified since cutoff</span>
             </Card>
 
-            <Card padding="md">
-              <span className="text-[11px] text-muted uppercase font-semibold">Audit Status</span>
-              <div className="text-xs font-semibold text-success mt-2">Advisory Signals Only</div>
-              <span className="text-[11px] text-muted">Requires manual review</span>
+            <Card className="p-3">
+              <span className="text-[11px] text-secondary uppercase font-mono">Review Required</span>
+              <div className="text-base font-bold text-warning mt-1">
+                {cleanupPlan?.reviewRequiredItems ?? 0} items
+              </div>
+              <div className="text-[11px] text-muted font-mono mt-0.5">
+                {formatBytes(cleanupPlan?.reviewRequiredBytes ?? 0)}
+              </div>
             </Card>
 
-            <Card padding="md">
-              <span className="text-[11px] text-muted uppercase font-semibold">Safety Level</span>
-              <div className="text-xs font-semibold text-primary mt-2">Zero Blind Purges</div>
-              <span className="text-[11px] text-muted">Read-only intelligence</span>
+            <Card className="p-3">
+              <span className="text-[11px] text-secondary uppercase font-mono">OS Protected</span>
+              <div className="text-base font-bold text-primary mt-1">
+                {cleanupPlan?.blockedItems ?? 0} items
+              </div>
+              <div className="text-[11px] text-muted mt-0.5">Blocked by Safeguards</div>
+            </Card>
+
+            <Card className="p-3 border-accent/40 bg-accent/5">
+              <span className="text-[11px] text-accent uppercase font-mono">Selected to Clean</span>
+              <div className="text-base font-bold text-accent mt-1">
+                {selectedCandidates.length} items
+              </div>
+              <div className="text-[11px] text-accent/80 font-mono mt-0.5">
+                {formatBytes(selectedBytes)}
+              </div>
             </Card>
           </div>
 
-          {/* Filter Bar */}
-          <Card padding="md" className="space-y-2">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <span className="text-muted font-medium mr-1">Age Filter:</span>
-                {[
-                  { label: '≥ 30 Days', days: 30 },
-                  { label: '≥ 60 Days', days: 60 },
-                  { label: '≥ 90 Days', days: 90 },
-                  { label: '≥ 180 Days', days: 180 },
-                  { label: '≥ 1 Year', days: 365 },
-                ].map((a) => (
-                  <button
-                    key={a.label}
-                    onClick={() => handleAgeChange(a.days)}
-                    className={`px-2 py-0.5 rounded text-[11px] font-mono transition-colors ${
-                      forgottenFilesQuery.minAgeDays === a.days
-                        ? 'bg-accent text-white font-semibold'
-                        : 'bg-elevated text-secondary hover:text-primary hover:bg-[#282D35]'
-                    }`}
-                  >
-                    {a.label}
-                  </button>
-                ))}
+          {/* Filtering Bar */}
+          <Card className="p-3 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              {/* Search */}
+              <div className="relative flex-1 max-w-sm">
+                <Search className="w-3.5 h-3.5 text-muted absolute left-2.5 top-2.5" />
+                <input
+                  type="text"
+                  placeholder="Filter recommendations by path or name..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full bg-[#101114] border border-border rounded pl-8 pr-3 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
+                />
               </div>
 
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <span className="text-muted font-medium mr-1">Signal:</span>
-                {[
-                  { id: 'all', label: 'All' },
-                  { id: 'old_download', label: 'Downloads' },
-                  { id: 'old_installer', label: 'Installers' },
-                  { id: 'old_archive', label: 'Archives' },
-                  { id: 'old_backup', label: 'Backups' },
-                  { id: 'stale_build_artifact', label: 'Builds' },
-                ].map((s) => (
-                  <button
-                    key={s.id}
-                    onClick={() => handleSignalChange(s.id)}
-                    className={`px-2 py-0.5 rounded text-[11px] transition-colors ${
-                      (forgottenFilesQuery.signalType || 'all') === s.id
-                        ? 'bg-accent text-white font-medium'
-                        : 'bg-elevated text-secondary hover:text-primary hover:bg-[#282D35]'
-                    }`}
-                  >
-                    {s.label}
-                  </button>
-                ))}
+              {/* Quick actions */}
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={selectAllSafe}
+                  icon={<CheckSquare className="w-3.5 h-3.5 text-success" />}
+                >
+                  Select All Safe
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={deselectAll}
+                  icon={<Square className="w-3.5 h-3.5" />}
+                >
+                  Deselect All
+                </Button>
               </div>
+            </div>
+
+            {/* Filter buttons */}
+            <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-border/40 text-xs">
+              <span className="text-secondary text-[11px] mr-1 flex items-center gap-1 font-mono">
+                <Filter className="w-3 h-3" /> Group:
+              </span>
+              <button
+                onClick={() => setGroupFilter('all')}
+                className={`px-2 py-0.5 rounded text-xs transition-colors ${
+                  groupFilter === 'all' ? 'bg-accent text-white' : 'bg-elevated text-secondary hover:text-primary'
+                }`}
+              >
+                All ({cleanupPlan?.totalItems ?? 0})
+              </button>
+              <button
+                onClick={() => setGroupFilter('safe_to_review')}
+                className={`px-2 py-0.5 rounded text-xs transition-colors ${
+                  groupFilter === 'safe_to_review' ? 'bg-success/20 text-success border border-success/30' : 'bg-elevated text-secondary hover:text-primary'
+                }`}
+              >
+                Safe to Review ({cleanupPlan?.safeItems ?? 0})
+              </button>
+              <button
+                onClick={() => setGroupFilter('review_required')}
+                className={`px-2 py-0.5 rounded text-xs transition-colors ${
+                  groupFilter === 'review_required' ? 'bg-warning/20 text-warning border border-warning/30' : 'bg-elevated text-secondary hover:text-primary'
+                }`}
+              >
+                Review Required ({cleanupPlan?.reviewRequiredItems ?? 0})
+              </button>
+              <button
+                onClick={() => setGroupFilter('system_protected')}
+                className={`px-2 py-0.5 rounded text-xs transition-colors ${
+                  groupFilter === 'system_protected' ? 'bg-panel text-primary border border-border' : 'bg-elevated text-secondary hover:text-primary'
+                }`}
+              >
+                Protected ({cleanupPlan?.blockedItems ?? 0})
+              </button>
+
+              <div className="h-3 w-px bg-border mx-1" />
+
+              <span className="text-secondary text-[11px] mr-1 font-mono">Risk:</span>
+              <select
+                value={riskFilter}
+                onChange={(e) => setRiskFilter(e.target.value as any)}
+                className="bg-[#101114] border border-border rounded px-2 py-0.5 text-xs text-primary font-mono"
+              >
+                <option value="all">All Risks</option>
+                <option value="low">Low Risk</option>
+                <option value="moderate">Moderate Risk</option>
+                <option value="high">High Risk</option>
+              </select>
             </div>
           </Card>
 
-          {/* Data Table */}
-          <div className="space-y-2">
-            <DataTable
-              columns={forgottenColumns}
-              data={forgottenFiles?.items || []}
-              emptyMessage={
-                forgottenFilesLoading
-                  ? 'Analyzing file age signals...'
-                  : 'No files matched the selected age and signal criteria.'
-              }
-            />
+          {/* Candidates List */}
+          {loadingPlan ? (
+            <Card className="p-8 text-center text-secondary text-xs">
+              Analyzing filesystem items and constructing cleanup plan...
+            </Card>
+          ) : filteredCandidates.length === 0 ? (
+            <Card className="p-8 text-center text-secondary text-xs">
+              No cleanup candidates match the active filters.
+            </Card>
+          ) : (
+            <div className="space-y-2.5">
+              {filteredCandidates.map((candidate: CleanupItemCandidate) => {
+                const isSelected = selectedIds.has(candidate.id);
+                return (
+                  <Card
+                    key={candidate.id}
+                    className={`p-3.5 transition-all border ${
+                      candidate.isBlocked
+                        ? 'opacity-65 border-border bg-[#101114]/50'
+                        : isSelected
+                        ? 'border-accent/40 bg-elevated/80'
+                        : 'border-border bg-panel hover:bg-elevated/40'
+                    }`}
+                  >
+                    <div className="flex items-start gap-3">
+                      {/* Checkbox or Blocked Icon */}
+                      <div className="pt-0.5">
+                        {candidate.isBlocked ? (
+                          <div title="Protected operating system component - cannot be deleted">
+                            <Lock className="w-4 h-4 text-muted shrink-0" />
+                          </div>
+                        ) : (
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleCandidateSelection(candidate.id)}
+                            className="w-4 h-4 rounded border-border text-accent focus:ring-0 focus:outline-none cursor-pointer"
+                          />
+                        )}
+                      </div>
 
-            {/* Pagination */}
-            {forgottenFiles && forgottenFiles.totalPages > 1 && (
-              <div className="flex items-center justify-between px-2 pt-2 text-xs text-secondary border-t border-border">
-                <span>
-                  Page {forgottenFiles.page} of {forgottenFiles.totalPages} ({formatNumber(forgottenFiles.totalItems)} total items)
-                </span>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    icon={<ChevronLeft className="w-3.5 h-3.5" />}
-                    onClick={() => {
-                      setForgottenFilesQuery({ page: forgottenFiles.page - 1 });
-                      fetchForgottenFiles();
-                    }}
-                    disabled={forgottenFiles.page <= 1}
-                  >
-                    Previous
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    icon={<ChevronRight className="w-3.5 h-3.5" />}
-                    onClick={() => {
-                      setForgottenFilesQuery({ page: forgottenFiles.page + 1 });
-                      fetchForgottenFiles();
-                    }}
-                    disabled={forgottenFiles.page >= forgottenFiles.totalPages}
-                  >
-                    Next
-                  </Button>
-                </div>
-              </div>
-            )}
+                      {/* Details */}
+                      <div className="flex-1 min-w-0 space-y-1">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 truncate">
+                            <span className="font-semibold text-primary text-xs truncate">
+                              {candidate.name}
+                            </span>
+                            <Badge variant="neutral" size="sm">
+                              {candidate.category}
+                            </Badge>
+                            {getRiskBadge(candidate.riskLevel)}
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className="font-mono text-xs font-semibold text-accent">
+                              {formatBytes(candidate.sizeBytes)}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Location */}
+                        <div className="font-mono text-[11px] text-secondary truncate" title={candidate.path}>
+                          {candidate.path}
+                        </div>
+
+                        {/* Rationale and consequences */}
+                        <div className="text-[11px] text-secondary flex items-start gap-1.5 pt-0.5">
+                          <Info className="w-3.5 h-3.5 text-muted shrink-0 mt-0.5" />
+                          <span>{candidate.reason} — <span className="text-muted">{candidate.expectedConsequences}</span></span>
+                        </div>
+
+                        {/* Cloud sync warning */}
+                        {candidate.isCloudSynced && candidate.cloudWarning && (
+                          <div className="p-2 bg-warning/10 border border-warning/20 rounded text-[11px] text-warning flex items-start gap-1.5">
+                            <CloudOff className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                            <span>{candidate.cloudWarning}</span>
+                          </div>
+                        )}
+
+                        {/* Blocked reason */}
+                        {candidate.isBlocked && candidate.blockReason && (
+                          <div className="p-2 bg-elevated/80 border border-border rounded text-[11px] text-secondary flex items-start gap-1.5">
+                            <ShieldAlert className="w-3.5 h-3.5 text-warning shrink-0 mt-0.5" />
+                            <span>{candidate.blockReason}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </Card>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Sticky Bottom Action Bar */}
+          <div className="fixed bottom-0 left-64 right-0 p-3 bg-panel/95 backdrop-blur-md border-t border-border flex items-center justify-between z-30 px-6">
+            <div className="flex items-center gap-4 text-xs">
+              <span className="text-secondary">
+                Selected for cleanup:{' '}
+                <strong className="text-primary font-mono">{selectedCandidates.length}</strong> items
+              </span>
+              <span className="text-secondary">
+                Total recoverable space:{' '}
+                <strong className="text-accent font-mono">{formatBytes(selectedBytes)}</strong>
+              </span>
+            </div>
+
+            <Button
+              variant="danger"
+              size="md"
+              onClick={() => setConfirmationModalOpen(true)}
+              disabled={selectedCandidates.length === 0}
+              icon={<Trash2 className="w-4 h-4" />}
+            >
+              Review & Execute Cleanup ({selectedCandidates.length})
+            </Button>
           </div>
         </div>
       )}
 
-      {/* Tab 2: Optimization Blueprints */}
-      {activeTab === 'blueprints' && (
-        <div className="space-y-3">
-          <Card padding="md" className="border-border bg-[#15171B] flex items-start gap-3">
-            <ShieldCheck className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
-            <div className="text-xs">
-              <span className="font-semibold text-primary">Explicit User Authorization Standard:</span>
-              <p className="text-secondary mt-0.5">
-                DiskAtlas guarantees no automatic file purges. Every cleanup candidate requires deliberate selection and an explicit confirmation dialog before moving files to trash or executing clean commands.
+      {/* TAB 2: AUDIT HISTORY */}
+      {activeTab === 'audit' && (
+        <Card className="p-4 space-y-3">
+          <div className="flex items-center justify-between pb-2 border-b border-border">
+            <div>
+              <h2 className="text-xs font-semibold text-primary">Cleanup Audit Trail</h2>
+              <p className="text-[11px] text-secondary mt-0.5">
+                Cryptographically verifiable event log of all files deleted, moved to Recycle Bin, or blocked by safeguards
               </p>
             </div>
-          </Card>
-
-          <div className="space-y-2">
-            <h2 className="text-xs font-semibold text-primary uppercase tracking-wider">
-              Optimization Rules & Recommended Areas
-            </h2>
-            <DataTable columns={recColumns} data={recommendations} />
+            <Badge variant="accent" size="sm">
+              {auditTotalItems} Total Logged Actions
+            </Badge>
           </div>
-        </div>
+
+          <DataTable
+            data={auditRecords}
+            columns={auditColumns}
+            emptyMessage="No cleanup operations have been performed yet."
+          />
+
+          {auditTotalPages > 1 && (
+            <div className="flex items-center justify-between pt-2 border-t border-border text-xs text-secondary font-mono">
+              <span>Page {auditPage} of {auditTotalPages}</span>
+              <div className="flex items-center gap-1.5">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={auditPage <= 1}
+                  onClick={() => fetchAuditHistory(auditPage - 1)}
+                  icon={<ChevronLeft className="w-3.5 h-3.5" />}
+                >
+                  Previous
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={auditPage >= auditTotalPages}
+                  onClick={() => fetchAuditHistory(auditPage + 1)}
+                  icon={<ChevronRight className="w-3.5 h-3.5" />}
+                >
+                  Next
+                </Button>
+              </div>
+            </div>
+          )}
+        </Card>
       )}
+
+      {/* TAB 3: FORGOTTEN FILES HEURISTICS */}
+      {activeTab === 'forgotten' && (
+        <Card className="p-4 space-y-3">
+          <div className="flex items-center justify-between pb-2 border-b border-border">
+            <div>
+              <h2 className="text-xs font-semibold text-primary">Heuristic Forgotten Files Analysis</h2>
+              <p className="text-[11px] text-secondary mt-0.5">
+                Stale downloads, unextracted installers, old archives, and dormant build outputs
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                variant={forgottenFilesQuery.minAgeDays === 30 ? 'primary' : 'outline'}
+                size="sm"
+                onClick={() => {
+                  setForgottenFilesQuery({ minAgeDays: 30, page: 1 });
+                  fetchForgottenFiles();
+                }}
+              >
+                &gt; 30 Days
+              </Button>
+              <Button
+                variant={forgottenFilesQuery.minAgeDays === 60 ? 'primary' : 'outline'}
+                size="sm"
+                onClick={() => {
+                  setForgottenFilesQuery({ minAgeDays: 60, page: 1 });
+                  fetchForgottenFiles();
+                }}
+              >
+                &gt; 60 Days
+              </Button>
+              <Button
+                variant={forgottenFilesQuery.minAgeDays === 90 ? 'primary' : 'outline'}
+                size="sm"
+                onClick={() => {
+                  setForgottenFilesQuery({ minAgeDays: 90, page: 1 });
+                  fetchForgottenFiles();
+                }}
+              >
+                &gt; 90 Days
+              </Button>
+            </div>
+          </div>
+
+          <DataTable
+            data={forgottenFiles?.items || []}
+            columns={forgottenColumns}
+            emptyMessage="No forgotten files detected for the selected threshold."
+          />
+        </Card>
+      )}
+
+      {/* Confirmation Modal */}
+      <CleanupConfirmationModal />
     </div>
   );
 };

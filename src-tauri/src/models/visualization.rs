@@ -81,3 +81,4 @@ pub struct StorageAnalyticsData {
     pub developer_storage: Vec<DeveloperEcosystemSummary>,
     pub history_trends: Vec<StorageSnapshotRecord>,
 }
+

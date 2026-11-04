@@ -646,5 +646,106 @@ export interface StorageAnalyticsData {
   historyTrends: StorageSnapshotRecord[];
 }
 
+// ==========================================
+// PHASE 11: SAFE CLEANUP CENTER TYPES
+// ==========================================
+
+export interface CleanupItemCandidate {
+  id: string;
+  path: string;
+  name: string;
+  sizeBytes: number;
+  category: string;
+  group: 'safe_to_review' | 'review_required' | 'system_protected' | 'move_or_archive' | 'uninstall_official';
+  riskLevel: 'none' | 'low' | 'moderate' | 'high' | 'critical';
+  reason: string;
+  confidence: number;
+  recoverableBytes: number;
+  expectedConsequences: string;
+  recommendedAction: string;
+  isCloudSynced: boolean;
+  cloudWarning?: string | null;
+  isBlocked: boolean;
+  blockReason?: string | null;
+  selected: boolean;
+  existsOnDisk: boolean;
+}
+
+export interface CleanupPlan {
+  batchId: string;
+  sessionId: string;
+  candidates: CleanupItemCandidate[];
+  totalItems: number;
+  totalBytes: number;
+  selectedItems: number;
+  selectedBytes: number;
+  safeItems: number;
+  safeBytes: number;
+  reviewRequiredItems: number;
+  reviewRequiredBytes: number;
+  blockedItems: number;
+  hasCloudSynced: boolean;
+}
+
+export interface ExecuteCleanupRequest {
+  batchId: string;
+  sessionId: string;
+  itemIds: string[];
+  useRecycleBin: boolean;
+  confirmationPhrase: string; // "CONFIRM_CLEANUP"
+}
+
+export interface CleanupOperationResult {
+  id: string;
+  path: string;
+  name: string;
+  sizeBytes: number;
+  status: 'success' | 'failed' | 'blocked_security' | 'in_use' | 'permission_denied' | 'not_found';
+  cleanupMethod: 'recycle_bin' | 'permanent_delete' | 'skipped';
+  isReversible: boolean;
+  errorMessage?: string | null;
+}
+
+export interface ExecuteCleanupResponse {
+  batchId: string;
+  totalAttempted: number;
+  successfulCount: number;
+  failedCount: number;
+  bytesReclaimed: number;
+  results: CleanupOperationResult[];
+}
+
+export interface CleanupAuditRecord {
+  id: string;
+  batchId: string;
+  sessionId?: string | null;
+  path: string;
+  name: string;
+  sizeBytes: number;
+  category: string;
+  riskLevel: string;
+  cleanupMethod: string;
+  status: string;
+  isReversible: boolean;
+  errorMessage?: string | null;
+  createdAt: string;
+}
+
+export interface CleanupAuditQuery {
+  sessionId?: string;
+  status?: string;
+  page: number;
+  pageSize: number;
+}
+
+export interface CleanupAuditResponse {
+  items: CleanupAuditRecord[];
+  totalItems: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+
 
 

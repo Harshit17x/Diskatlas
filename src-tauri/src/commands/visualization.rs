@@ -23,3 +23,4 @@ pub async fn get_storage_analytics(
     let conn = conn_arc.lock().unwrap();
     VisualizationService::get_storage_analytics(&conn, session_id.as_deref())
 }
+

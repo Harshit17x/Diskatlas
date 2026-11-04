@@ -27,6 +27,12 @@ pub enum AppError {
 
     #[error("Item not found: {0}")]
     NotFound(String),
+
+    #[error("Validation failed: {0}")]
+    ValidationFailed(String),
+
+    #[error("Security violation: {0}")]
+    SecurityViolation(String),
 }
 
 impl Serialize for AppError {
@@ -45,6 +51,8 @@ impl Serialize for AppError {
             AppError::System(_) => "SYSTEM_ERROR",
             AppError::Migration(_) => "MIGRATION_ERROR",
             AppError::NotFound(_) => "NOT_FOUND",
+            AppError::ValidationFailed(_) => "VALIDATION_FAILED",
+            AppError::SecurityViolation(_) => "SECURITY_VIOLATION",
         };
 
         state.serialize_field("code", code)?;

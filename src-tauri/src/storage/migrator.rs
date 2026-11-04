@@ -44,6 +44,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0007_storage_intelligence",
         sql: include_str!("../../migrations/0007_storage_intelligence.sql"),
     },
+    Migration {
+        version: 8,
+        name: "0008_cleanup_audit_history",
+        sql: include_str!("../../migrations/0008_cleanup_audit_history.sql"),
+    },
 ];
 
 pub struct Migrator;
@@ -145,7 +150,7 @@ mod tests {
     fn test_migrations_apply_cleanly_on_empty_db() {
         let mut conn = Connection::open_in_memory().unwrap();
         let version = Migrator::run(&mut conn).unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
 
         // Verify tables were created
         let tables_count: i64 = conn
@@ -154,13 +159,14 @@ mod tests {
                     'drives', 'scan_sessions', 'app_settings', 'files', 'directories',
                     'scan_errors', '_migrations', 'storage_snapshots', 'category_summaries',
                     'category_overrides', 'classification_summaries', 'developer_projects',
-                    'developer_ecosystem_summaries', 'file_hashes', 'storage_recommendations'
+                    'developer_ecosystem_summaries', 'file_hashes', 'storage_recommendations',
+                    'cleanup_audit_events'
                 )",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(tables_count, 15);
+        assert_eq!(tables_count, 16);
     }
 
     #[test]

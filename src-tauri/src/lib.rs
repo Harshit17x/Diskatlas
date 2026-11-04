@@ -29,6 +29,7 @@ use crate::commands::{
     scanner::{cancel_scan, get_scan_files, get_scan_progress, pause_scan, resume_scan, start_scan},
     system::get_system_info,
     visualization::{get_hierarchical_tree, get_storage_analytics},
+    cleanup::{get_cleanup_plan, execute_cleanup, get_cleanup_audit_history},
 };
 use crate::services::scanner::ScanManager;
 use crate::storage::{migrator::Migrator, DbPool};
@@ -124,6 +125,9 @@ pub fn run() {
             get_storage_recommendations,
             get_hierarchical_tree,
             get_storage_analytics,
+            get_cleanup_plan,
+            execute_cleanup,
+            get_cleanup_audit_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DiskAtlas desktop application");
