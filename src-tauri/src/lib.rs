@@ -9,7 +9,11 @@ use tauri::Manager;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use crate::commands::{database::get_database_health, drives::list_drives, system::get_system_info};
+use crate::commands::{
+    database::get_database_health,
+    drives::{get_drive_details, get_drives, list_drives},
+    system::get_system_info,
+};
 use crate::storage::{migrator::Migrator, DbPool};
 
 pub fn run() {
@@ -64,6 +68,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_system_info,
+            get_drives,
+            get_drive_details,
             list_drives,
             get_database_health,
         ])

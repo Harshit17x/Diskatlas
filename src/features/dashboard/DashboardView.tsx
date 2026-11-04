@@ -19,9 +19,9 @@ export const DashboardView: React.FC = () => {
   const { drives, systemInfo, dbHealth } = useDriveStore();
   const { setActiveTab } = useUIStore();
 
-  const totalCapacity = drives.reduce((acc, d) => acc + d.totalBytes, 0);
-  const totalUsed = drives.reduce((acc, d) => acc + d.usedBytes, 0);
-  const totalAvailable = drives.reduce((acc, d) => acc + d.availableBytes, 0);
+  const totalCapacity = drives.reduce((acc, d) => acc + (d.totalBytes ?? 0), 0);
+  const totalUsed = drives.reduce((acc, d) => acc + (d.usedBytes ?? 0), 0);
+  const totalAvailable = drives.reduce((acc, d) => acc + (d.availableBytes ?? 0), 0);
   const overallPercent = totalCapacity > 0 ? (totalUsed / totalCapacity) * 100 : 0;
 
   return (

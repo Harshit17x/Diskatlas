@@ -65,7 +65,7 @@ export const Header: React.FC = () => {
             >
               {drives.map((d) => (
                 <option key={d.id} value={d.id} className="bg-panel text-primary">
-                  {d.label} ({d.mountPoint})
+                  {d.name} {d.driveLetter ? `[${d.driveLetter}]` : `(${d.mountPoint})`}
                 </option>
               ))}
             </select>

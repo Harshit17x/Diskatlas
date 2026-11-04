@@ -3,19 +3,43 @@
  * Matches structs defined in src-tauri/src/models/
  */
 
-export type DriveType = 'Fixed' | 'Removable' | 'Network' | 'CDRom' | 'Ram' | 'Unknown';
+export type DriveType =
+  | 'internalHdd'
+  | 'internalSsd'
+  | 'externalHdd'
+  | 'externalSsd'
+  | 'usb'
+  | 'sdCard'
+  | 'network'
+  | 'optical'
+  | 'ram'
+  | 'unknown';
 
 export interface DriveInfo {
   id: string;               // e.g. "C:", "/dev/disk1s1"
-  label: string;            // e.g. "Windows", "Macintosh HD"
+  name: string;             // Volume name or label e.g. "Windows", "Macintosh HD"
+  driveLetter: string | null; // e.g. "C:", "D:"
   mountPoint: string;       // e.g. "C:\\", "/"
-  fileSystem: string;       // e.g. "NTFS", "APFS", "ext4"
-  totalBytes: number;       // total space
-  availableBytes: number;   // free space
-  usedBytes: number;        // total - available
-  usedPercent: number;      // 0 - 100
+  fileSystem: string | null;// e.g. "NTFS", "APFS", "FAT32"
+  totalBytes: number | null; // null if unmounted, empty optical tray, or inaccessible
+  availableBytes: number | null;
+  usedBytes: number | null;
+  usedPercent: number | null;
+  driveType: DriveType;
+  volumeId: string | null;  // Serial number or GUID
   isRemovable: boolean;
   isSystem: boolean;
+  isReadOnly: boolean;
+}
+
+export interface DriveDetails {
+  drive: DriveInfo;
+  busType: string | null;   // e.g. "NVMe", "USB", "SATA", "Apple Fabric"
+  serialNumber: string | null;
+  sectorsPerCluster: number | null;
+  bytesPerSector: number | null;
+  isEncrypted: boolean | null;
+  flags: string[];
 }
 
 export interface SystemInfo {
@@ -42,4 +66,3 @@ export interface AppError {
   message: string;
   details?: string;
 }
-

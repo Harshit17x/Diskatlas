@@ -82,6 +82,16 @@ export const DriveExplorerView: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
+          {selectedDrive && (
+            <Button
+              variant="outline"
+              size="sm"
+              icon={<RotateCw className="w-3.5 h-3.5" />}
+              onClick={() => useDriveStore.getState().openDetailModal(selectedDrive.id)}
+            >
+              Volume Diagnostics
+            </Button>
+          )}
           <Button
             variant="primary"
             size="sm"
@@ -90,9 +100,6 @@ export const DriveExplorerView: React.FC = () => {
             title="Starts Rayon high-throughput filesystem scanner (Staged for Phase 3)"
           >
             Scan Root Path
-          </Button>
-          <Button variant="secondary" size="sm" icon={<RotateCw className="w-3.5 h-3.5" />}>
-            Reload
           </Button>
         </div>
       </div>
@@ -114,7 +121,7 @@ export const DriveExplorerView: React.FC = () => {
             >
               {drives.map((d) => (
                 <option key={d.id} value={d.id}>
-                  {d.label} ({d.mountPoint}) — {formatBytes(d.totalBytes)}
+                  {d.name} {d.driveLetter ? `[${d.driveLetter}]` : `(${d.mountPoint})`} — {d.totalBytes !== null ? formatBytes(d.totalBytes) : 'No Media'}
                 </option>
               ))}
             </select>
@@ -154,3 +161,4 @@ export const DriveExplorerView: React.FC = () => {
     </div>
   );
 };
+

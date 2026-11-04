@@ -17,7 +17,9 @@ export const StatusBar: React.FC = () => {
             <HardDrive className="w-3 h-3 text-accent" />
             <span>Target:</span>
             <span className="text-primary font-medium">{selectedDrive.mountPoint}</span>
-            <span className="text-muted">({formatBytes(selectedDrive.availableBytes)} free)</span>
+            <span className="text-muted">
+              ({selectedDrive.availableBytes !== null ? `${formatBytes(selectedDrive.availableBytes)} free` : 'unallocated'})
+            </span>
           </div>
         ) : (
           <div className="flex items-center gap-1.5 text-muted">

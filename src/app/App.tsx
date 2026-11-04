@@ -13,6 +13,7 @@ import { DuplicateFinderView } from '../features/duplicates/DuplicateFinderView'
 import { CleanupCenterView } from '../features/cleanup/CleanupCenterView';
 import { StorageHistoryView } from '../features/history/StorageHistoryView';
 import { SettingsView } from '../features/settings/SettingsView';
+import { DriveDetailsModal } from '../features/drives/DriveDetailsModal';
 import { useUIStore } from '../stores/uiStore';
 import { useDriveStore } from '../stores/driveStore';
 
@@ -109,6 +110,7 @@ export const App: React.FC = () => {
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-canvas text-primary">
       <CommandPalette />
+      <DriveDetailsModal />
       <Header />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
