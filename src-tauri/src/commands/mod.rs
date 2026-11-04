@@ -1,5 +1,6 @@
 pub mod classification;
 pub mod database;
+pub mod developer;
 pub mod drives;
 pub mod history;
 pub mod scanner;

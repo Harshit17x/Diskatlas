@@ -358,3 +358,4 @@ impl RuleMatcher {
         "Installed Application".to_string()
     }
 }
+

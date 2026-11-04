@@ -15,6 +15,7 @@ use crate::commands::{
         get_category_overrides, get_storage_analysis,
     },
     database::get_database_health,
+    developer::{get_developer_storage, get_docker_storage, get_global_tool_caches},
     drives::{get_drive_details, get_drives, list_drives},
     history::{
         compare_scans, create_manual_snapshot, delete_scan_session, get_scan_sessions,
@@ -105,6 +106,9 @@ pub fn run() {
             get_category_overrides,
             add_category_override,
             delete_category_override,
+            get_developer_storage,
+            get_docker_storage,
+            get_global_tool_caches,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DiskAtlas desktop application");

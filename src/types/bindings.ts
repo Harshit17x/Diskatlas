@@ -293,3 +293,58 @@ export interface CategoryOverrideRule {
   subcategory: string | null;
   createdAt: string;
 }
+
+export interface DeveloperProjectItem {
+  id: string;
+  sessionId: string;
+  name: string;
+  rootPath: string;
+  ecosystem: string;
+  dependencyBytes: number;
+  cacheBytes: number;
+  buildOutputBytes: number;
+  totalBytes: number;
+  fileCount: number;
+  lastModifiedAt: number | null;
+  confidence: number;
+}
+
+export interface DeveloperEcosystemSummary {
+  ecosystem: string;
+  projectCount: number;
+  totalBytes: number;
+  dependencyBytes: number;
+  cacheBytes: number;
+  buildBytes: number;
+}
+
+export interface DockerStorageInfo {
+  isAvailable: boolean;
+  imagesBytes: number;
+  imagesCount: number;
+  containersBytes: number;
+  containersCount: number;
+  volumesBytes: number;
+  volumesCount: number;
+  buildCacheBytes: number;
+  totalBytes: number;
+  statusMessage: string;
+}
+
+export interface GlobalToolCacheItem {
+  tool: string;
+  path: string;
+  sizeBytes: number;
+  fileCount: number;
+  exists: boolean;
+}
+
+export interface DeveloperAnalysisProfile {
+  sessionId: string;
+  totalDeveloperBytes: number;
+  totalProjects: number;
+  ecosystems: DeveloperEcosystemSummary[];
+  projects: DeveloperProjectItem[];
+  docker: DockerStorageInfo;
+  globalCaches: GlobalToolCacheItem[];
+}

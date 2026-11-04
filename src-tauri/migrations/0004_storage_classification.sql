@@ -33,3 +33,4 @@ CREATE INDEX IF NOT EXISTS idx_files_session_cat ON files(session_id, category);
 CREATE INDEX IF NOT EXISTS idx_files_session_subcat ON files(session_id, category, subcategory);
 CREATE INDEX IF NOT EXISTS idx_files_session_app ON files(session_id, app_name);
 CREATE INDEX IF NOT EXISTS idx_class_summaries_session ON classification_summaries(session_id);
+

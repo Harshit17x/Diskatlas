@@ -59,3 +59,4 @@ pub async fn delete_category_override(
 ) -> Result<()> {
     ClassifierService::delete_override(&db, id)
 }
+
