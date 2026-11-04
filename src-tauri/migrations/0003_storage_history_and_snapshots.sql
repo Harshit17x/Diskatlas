@@ -32,3 +32,4 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_session ON storage_snapshots(session_id
 CREATE INDEX IF NOT EXISTS idx_category_summaries_session ON category_summaries(session_id);
 CREATE INDEX IF NOT EXISTS idx_files_session_path ON files(session_id, path);
 CREATE INDEX IF NOT EXISTS idx_dirs_session_path ON directories(session_id, path);
+

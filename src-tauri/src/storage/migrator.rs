@@ -24,6 +24,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0003_storage_history_and_snapshots",
         sql: include_str!("../../migrations/0003_storage_history_and_snapshots.sql"),
     },
+    Migration {
+        version: 4,
+        name: "0004_storage_classification",
+        sql: include_str!("../../migrations/0004_storage_classification.sql"),
+    },
 ];
 
 pub struct Migrator;
@@ -125,20 +130,21 @@ mod tests {
     fn test_migrations_apply_cleanly_on_empty_db() {
         let mut conn = Connection::open_in_memory().unwrap();
         let version = Migrator::run(&mut conn).unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
 
         // Verify tables were created
         let tables_count: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN (
                     'drives', 'scan_sessions', 'app_settings', 'files', 'directories',
-                    'scan_errors', '_migrations', 'storage_snapshots', 'category_summaries'
+                    'scan_errors', '_migrations', 'storage_snapshots', 'category_summaries',
+                    'category_overrides', 'classification_summaries'
                 )",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(tables_count, 9);
+        assert_eq!(tables_count, 11);
     }
 
     #[test]

@@ -146,3 +146,4 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
   clearComparison: () => set({ comparisonResult: null, baselineSessionId: null, targetSessionId: null }),
   clearSelectedSession: () => set({ selectedSessionDetails: null }),
 }));
+

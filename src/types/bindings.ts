@@ -233,3 +233,63 @@ export interface ScanComparisonResult {
   removedFilesSample: ScanFileItem[];
   modifiedFilesSample: FileModifiedItem[];
 }
+
+export type StorageCategoryKey =
+  | 'os'
+  | 'applications'
+  | 'developer'
+  | 'temporary'
+  | 'documents'
+  | 'images'
+  | 'videos'
+  | 'audio'
+  | 'archives'
+  | 'browsers'
+  | 'cloud'
+  | 'gaming'
+  | 'backups'
+  | 'vm_emulators'
+  | 'hidden'
+  | 'unknown';
+
+export interface SubcategoryStatItem {
+  subcategory: string;
+  fileCount: number;
+  totalBytes: number;
+}
+
+export interface AppStatItem {
+  appName: string;
+  fileCount: number;
+  totalBytes: number;
+}
+
+export interface CategoryStatItem {
+  category: string;
+  label: string;
+  fileCount: number;
+  dirCount: number;
+  totalBytes: number;
+  percentageBytes: number;
+  avgConfidence: number;
+  subcategories: SubcategoryStatItem[];
+  topApps: AppStatItem[];
+}
+
+export interface StorageAnalysisProfile {
+  sessionId: string;
+  driveId: string;
+  totalFiles: number;
+  totalBytes: number;
+  categories: CategoryStatItem[];
+  classifiedPercent: number;
+  overallConfidence: number;
+}
+
+export interface CategoryOverrideRule {
+  id: number;
+  pattern: string;
+  category: string;
+  subcategory: string | null;
+  createdAt: string;
+}

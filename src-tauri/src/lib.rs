@@ -10,6 +10,10 @@ use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use crate::commands::{
+    classification::{
+        add_category_override, classify_session, delete_category_override, get_category_files,
+        get_category_overrides, get_storage_analysis,
+    },
     database::get_database_health,
     drives::{get_drive_details, get_drives, list_drives},
     history::{
@@ -95,6 +99,12 @@ pub fn run() {
             get_storage_snapshots,
             create_manual_snapshot,
             compare_scans,
+            get_storage_analysis,
+            classify_session,
+            get_category_files,
+            get_category_overrides,
+            add_category_override,
+            delete_category_override,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DiskAtlas desktop application");

@@ -130,3 +130,4 @@ pub struct ScanComparisonResult {
     pub removed_files_sample: Vec<ScanFileItem>,
     pub modified_files_sample: Vec<FileModifiedItem>,
 }
+

@@ -63,3 +63,4 @@ pub async fn compare_scans(
 ) -> Result<ScanComparisonResult> {
     HistoryService::compare_scans(&db, &baseline_session_id, &target_session_id)
 }
+

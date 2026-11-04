@@ -1,3 +1,4 @@
+pub mod classification;
 pub mod database;
 pub mod drives;
 pub mod history;
