@@ -6,9 +6,10 @@ import { Tabs } from '../../components/common/Tabs';
 import { DataTable } from '../../components/common/DataTable';
 import { Modal } from '../../components/common/Modal';
 import type { ColumnDef } from '@tanstack/react-table';
-import type { ScanFileItem } from '../../types/bindings';
+import type { ScanFileItem, LargeFileItem, UnknownStorageItem } from '../../types/bindings';
 import { useAnalysisStore } from '../../stores/analysisStore';
 import { useHistoryStore } from '../../stores/historyStore';
+import { useAdvancedAnalysisStore } from '../../stores/advancedAnalysisStore';
 import { formatBytes, formatNumber } from '../../utils/formatters';
 import {
   Film,
@@ -63,14 +64,38 @@ export const StorageAnalysisView: React.FC = () => {
 
   const { sessionsPage, fetchSessions } = useHistoryStore();
 
+  const {
+    largeFiles,
+    largeFilesLoading,
+    largeFilesQuery,
+    setLargeFilesQuery,
+    fetchLargeFiles,
+    unknownStorage,
+    unknownStorageLoading,
+    fetchUnknownStorage,
+  } = useAdvancedAnalysisStore();
+
   useEffect(() => {
     fetchSessions(1, 20);
     fetchOverrides();
     fetchAnalysis();
   }, [fetchSessions, fetchOverrides, fetchAnalysis]);
 
+  useEffect(() => {
+    if (activeTab === 'large_files') {
+      fetchLargeFiles(activeProfile?.sessionId);
+    } else if (activeTab === 'unknown') {
+      fetchUnknownStorage(activeProfile?.sessionId);
+    }
+  }, [activeTab, activeProfile?.sessionId, fetchLargeFiles, fetchUnknownStorage]);
+
   const handleSelectSession = (sid: string) => {
     fetchAnalysis(sid);
+    if (activeTab === 'large_files') {
+      fetchLargeFiles(sid);
+    } else if (activeTab === 'unknown') {
+      fetchUnknownStorage(sid);
+    }
   };
 
   const handleAddOverride = async () => {
@@ -170,6 +195,157 @@ export const StorageAnalysisView: React.FC = () => {
         <span className="font-mono text-secondary text-[11px] truncate block max-w-md" title={String(getValue())}>
           {String(getValue())}
         </span>
+      ),
+    },
+  ];
+
+  const largeFileColumns: ColumnDef<LargeFileItem>[] = [
+    {
+      accessorKey: 'name',
+      header: 'File Name',
+      cell: ({ row }) => (
+        <span className="font-sans font-medium text-primary truncate block max-w-xs" title={row.original.path}>
+          {row.original.name}
+        </span>
+      ),
+    },
+    {
+      accessorKey: 'extension',
+      header: 'Ext',
+      cell: ({ getValue }) => {
+        const ext = getValue() as string | null;
+        return ext ? (
+          <Badge variant="neutral" size="sm">.{ext.toUpperCase()}</Badge>
+        ) : (
+          <span className="text-muted text-xs">—</span>
+        );
+      },
+    },
+    {
+      accessorKey: 'sizeBytes',
+      header: 'Size',
+      cell: ({ getValue }) => (
+        <span className="font-mono text-accent font-semibold text-xs">
+          {formatBytes(Number(getValue()))}
+        </span>
+      ),
+    },
+    {
+      accessorKey: 'category',
+      header: 'Category',
+      cell: ({ getValue }) => {
+        const cat = (getValue() as string | null) || 'unknown';
+        return <Badge variant="accent" size="sm">{cat}</Badge>;
+      },
+    },
+    {
+      accessorKey: 'path',
+      header: 'Full Location',
+      cell: ({ getValue }) => (
+        <span className="font-mono text-secondary text-[11px] truncate block max-w-md" title={String(getValue())}>
+          {String(getValue())}
+        </span>
+      ),
+    },
+  ];
+
+  const unknownDirColumns: ColumnDef<UnknownStorageItem>[] = [
+    {
+      accessorKey: 'path',
+      header: 'Directory Location',
+      cell: ({ row }) => (
+        <span className="font-mono text-primary text-xs truncate block max-w-sm" title={row.original.path}>
+          {row.original.path}
+        </span>
+      ),
+    },
+    {
+      accessorKey: 'fileCount',
+      header: 'Unclassified Files',
+      cell: ({ getValue }) => <span className="font-mono text-secondary text-xs">{formatNumber(Number(getValue()))}</span>,
+    },
+    {
+      accessorKey: 'sizeBytes',
+      header: 'Unclassified Size',
+      cell: ({ getValue }) => (
+        <span className="font-mono text-warning font-semibold text-xs">
+          {formatBytes(Number(getValue()))}
+        </span>
+      ),
+    },
+    {
+      accessorKey: 'confidence',
+      header: 'Avg Confidence',
+      cell: ({ getValue }) => getConfidenceBadge(Number(getValue())),
+    },
+    {
+      id: 'action',
+      header: () => <span className="text-right block">Action</span>,
+      cell: ({ row }) => (
+        <div className="text-right">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              setOverridePattern(row.original.path);
+              setIsOverrideModalOpen(true);
+            }}
+          >
+            Create Rule
+          </Button>
+        </div>
+      ),
+    },
+  ];
+
+  const unknownFileColumns: ColumnDef<UnknownStorageItem>[] = [
+    {
+      accessorKey: 'path',
+      header: 'File Location',
+      cell: ({ row }) => (
+        <span className="font-mono text-primary text-xs truncate block max-w-md" title={row.original.path}>
+          {row.original.path}
+        </span>
+      ),
+    },
+    {
+      accessorKey: 'extension',
+      header: 'Ext',
+      cell: ({ getValue }) => {
+        const ext = getValue() as string | null;
+        return ext ? <Badge variant="neutral" size="sm">.{ext.toUpperCase()}</Badge> : <span className="text-muted text-xs">—</span>;
+      },
+    },
+    {
+      accessorKey: 'sizeBytes',
+      header: 'Size',
+      cell: ({ getValue }) => (
+        <span className="font-mono text-accent font-semibold text-xs">
+          {formatBytes(Number(getValue()))}
+        </span>
+      ),
+    },
+    {
+      accessorKey: 'confidence',
+      header: 'Confidence',
+      cell: ({ getValue }) => getConfidenceBadge(Number(getValue())),
+    },
+    {
+      id: 'action',
+      header: () => <span className="text-right block">Action</span>,
+      cell: ({ row }) => (
+        <div className="text-right">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              setOverridePattern(row.original.path);
+              setIsOverrideModalOpen(true);
+            }}
+          >
+            Create Rule
+          </Button>
+        </div>
       ),
     },
   ];
@@ -279,6 +455,8 @@ export const StorageAnalysisView: React.FC = () => {
         <Tabs
           tabs={[
             { id: 'categories', label: `16 Storage Categories (${activeProfile?.categories.length ?? 0})` },
+            { id: 'large_files', label: `Large Files Analyzer` },
+            { id: 'unknown', label: `Unknown Storage` },
             { id: 'drilldown', label: selectedCategory ? `Drilldown: ${selectedCategory.toUpperCase()}` : 'Path Drilldown' },
             { id: 'overrides', label: `Override Rules (${overrides.length})` },
           ]}
@@ -361,6 +539,167 @@ export const StorageAnalysisView: React.FC = () => {
                 })}
               </div>
             )}
+          </div>
+        )}
+
+        {/* Tab 2: Large Files Analyzer */}
+        {activeTab === 'large_files' && (
+          <div className="space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-muted font-medium mr-1">Minimum Size:</span>
+                {[
+                  { label: '≥ 10 MB', bytes: 10485760 },
+                  { label: '≥ 50 MB', bytes: 52428800 },
+                  { label: '≥ 100 MB', bytes: 104857600 },
+                  { label: '≥ 500 MB', bytes: 524288000 },
+                  { label: '≥ 1 GB', bytes: 1073741824 },
+                ].map((s) => (
+                  <button
+                    key={s.label}
+                    onClick={() => {
+                      setLargeFilesQuery({ minSizeBytes: s.bytes, page: 1 });
+                      fetchLargeFiles(activeProfile?.sessionId);
+                    }}
+                    className={`px-2 py-0.5 rounded text-[11px] font-mono transition-colors ${
+                      largeFilesQuery.minSizeBytes === s.bytes
+                        ? 'bg-accent text-white font-medium'
+                        : 'bg-elevated text-secondary hover:text-primary hover:bg-[#282D35]'
+                    }`}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  placeholder="Ext (e.g. mp4)"
+                  value={largeFilesQuery.extension || ''}
+                  onChange={(e) => setLargeFilesQuery({ extension: e.target.value, page: 1 })}
+                  onKeyDown={(e) => e.key === 'Enter' && fetchLargeFiles(activeProfile?.sessionId)}
+                  className="bg-[#15171B] border border-border rounded px-2 py-1 text-xs text-primary font-mono placeholder-muted focus:outline-none focus:border-accent w-28"
+                />
+
+                <select
+                  value={largeFilesQuery.sortBy || 'size_desc'}
+                  onChange={(e) => {
+                    setLargeFilesQuery({ sortBy: e.target.value as any, page: 1 });
+                    fetchLargeFiles(activeProfile?.sessionId);
+                  }}
+                  className="bg-[#15171B] border border-border rounded px-2 py-1 text-xs text-primary font-mono focus:outline-none focus:border-accent"
+                >
+                  <option value="size_desc">Largest First</option>
+                  <option value="size_asc">Smallest First</option>
+                  <option value="modified_desc">Recently Modified</option>
+                  <option value="name_asc">Name A-Z</option>
+                </select>
+
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  icon={<RotateCw className={`w-3.5 h-3.5 ${largeFilesLoading ? 'animate-spin' : ''}`} />}
+                  onClick={() => fetchLargeFiles(activeProfile?.sessionId)}
+                >
+                  Apply
+                </Button>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between text-xs text-muted">
+              <span>
+                Matching Items: <strong className="text-primary font-mono">{formatNumber(largeFiles?.totalItems ?? 0)}</strong> • Storage Total: <strong className="text-accent font-mono">{formatBytes(largeFiles?.totalBytes ?? 0)}</strong>
+              </span>
+              {largeFiles && largeFiles.totalPages > 1 && (
+                <div className="flex items-center gap-1">
+                  <span className="mr-2">Page {largeFiles.page} of {largeFiles.totalPages}</span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    icon={<ChevronLeft className="w-3 h-3" />}
+                    onClick={() => {
+                      setLargeFilesQuery({ page: largeFiles.page - 1 });
+                      fetchLargeFiles(activeProfile?.sessionId);
+                    }}
+                    disabled={largeFiles.page <= 1}
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    icon={<ChevronRight className="w-3 h-3" />}
+                    onClick={() => {
+                      setLargeFilesQuery({ page: largeFiles.page + 1 });
+                      fetchLargeFiles(activeProfile?.sessionId);
+                    }}
+                    disabled={largeFiles.page >= largeFiles.totalPages}
+                  />
+                </div>
+              )}
+            </div>
+
+            <DataTable
+              columns={largeFileColumns}
+              data={largeFiles?.items || []}
+              emptyMessage={largeFilesLoading ? 'Filtering large files...' : 'No files found matching the large files filter criteria.'}
+            />
+          </div>
+        )}
+
+        {/* Tab 3: Unknown Storage Analyzer */}
+        {activeTab === 'unknown' && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <Card padding="md">
+                <span className="text-[11px] text-muted uppercase font-semibold">Unclassified Storage</span>
+                <div className="text-xl font-bold font-mono text-warning mt-1">
+                  {formatBytes(unknownStorage?.totalUnknownBytes ?? 0)}
+                </div>
+                <span className="text-[11px] text-muted font-mono">{formatNumber(unknownStorage?.totalUnknownFiles ?? 0)} files</span>
+              </Card>
+
+              <Card padding="md">
+                <span className="text-[11px] text-muted uppercase font-semibold">Confidence Threshold</span>
+                <div className="text-xl font-bold font-mono text-primary mt-1">&lt; 60%</div>
+                <span className="text-[11px] text-muted">Preserved for user verification</span>
+              </Card>
+
+              <Card padding="md">
+                <span className="text-[11px] text-muted uppercase font-semibold">Safety Guarantee</span>
+                <div className="text-xs font-semibold text-success mt-2">Zero Blind Deletions</div>
+                <span className="text-[11px] text-muted">Unknown data is never discarded</span>
+              </Card>
+            </div>
+
+            {/* Top Unknown Directories Rollup */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-semibold text-primary uppercase tracking-wider">
+                  Top Unclassified Directories (Rollup)
+                </h3>
+                <span className="text-[11px] text-muted">Aggregated unclassified space by folder</span>
+              </div>
+              <DataTable
+                columns={unknownDirColumns}
+                data={unknownStorage?.topUnknownDirectories || []}
+                emptyMessage={unknownStorageLoading ? 'Aggregating unclassified folders...' : 'No unknown directories detected.'}
+              />
+            </div>
+
+            {/* Unknown Files Detailed List */}
+            <div className="space-y-2 pt-2">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-semibold text-primary uppercase tracking-wider">
+                  Unclassified Files (Low Heuristic Confidence)
+                </h3>
+                <span className="text-[11px] text-muted">Click &quot;Create Rule&quot; to assign custom category</span>
+              </div>
+              <DataTable
+                columns={unknownFileColumns}
+                data={unknownStorage?.items || []}
+                emptyMessage={unknownStorageLoading ? 'Loading unknown files...' : 'No unclassified files found.'}
+              />
+            </div>
           </div>
         )}
 

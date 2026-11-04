@@ -1,3 +1,4 @@
+pub mod analysis;
 pub mod classification;
 pub mod database;
 pub mod developer;

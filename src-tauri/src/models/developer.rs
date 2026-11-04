@@ -64,3 +64,4 @@ pub struct DeveloperAnalysisProfile {
     pub docker: DockerStorageInfo,
     pub global_caches: Vec<GlobalToolCacheItem>,
 }
+

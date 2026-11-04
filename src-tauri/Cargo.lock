@@ -614,9 +614,11 @@ dependencies = [
 name = "diskatlas"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "sysinfo",
  "tauri",
  "tauri-build",

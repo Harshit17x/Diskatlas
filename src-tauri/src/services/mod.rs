@@ -1,3 +1,4 @@
+pub mod analysis;
 pub mod classifier;
 pub mod developer;
 pub mod drive_detector;

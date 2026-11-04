@@ -10,6 +10,10 @@ use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use crate::commands::{
+    analysis::{
+        find_duplicates, get_forgotten_files, get_hidden_files, get_large_files,
+        get_unknown_storage,
+    },
     classification::{
         add_category_override, classify_session, delete_category_override, get_category_files,
         get_category_overrides, get_storage_analysis,
@@ -109,6 +113,11 @@ pub fn run() {
             get_developer_storage,
             get_docker_storage,
             get_global_tool_caches,
+            get_large_files,
+            get_hidden_files,
+            find_duplicates,
+            get_forgotten_files,
+            get_unknown_storage,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DiskAtlas desktop application");

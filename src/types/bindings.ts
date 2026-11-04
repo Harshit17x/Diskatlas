@@ -348,3 +348,151 @@ export interface DeveloperAnalysisProfile {
   docker: DockerStorageInfo;
   globalCaches: GlobalToolCacheItem[];
 }
+
+// ==========================================
+// PHASE 8: ADVANCED STORAGE ANALYSIS TYPES
+// ==========================================
+
+export interface LargeFileItem {
+  id: number;
+  sessionId: string;
+  path: string;
+  name: string;
+  extension: string | null;
+  sizeBytes: number;
+  category: string | null;
+  modifiedAt: number | null;
+  isHidden: boolean;
+  isSystem: boolean;
+}
+
+export interface LargeFilesQuery {
+  sessionId?: string;
+  minSizeBytes?: number;
+  extension?: string;
+  pathFilter?: string;
+  sortBy?: 'size_desc' | 'size_asc' | 'modified_desc' | 'name_asc';
+  page: number;
+  pageSize: number;
+}
+
+export interface LargeFilesResponse {
+  items: LargeFileItem[];
+  totalItems: number;
+  totalBytes: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+export interface HiddenItem {
+  id: number;
+  path: string;
+  name: string;
+  isDirectory: boolean;
+  sizeBytes: number;
+  modifiedAt: number | null;
+  hiddenType: 'system_protected' | 'user_hidden' | 'dotfile' | 'app_hidden' | string;
+  protectionLevel: 'system_protected' | 'user_managed' | 'app_managed' | string;
+  safetyNote: string;
+}
+
+export interface HiddenFilesQuery {
+  sessionId?: string;
+  filterType?: string;
+  search?: string;
+  page: number;
+  pageSize: number;
+}
+
+export interface HiddenFilesResponse {
+  items: HiddenItem[];
+  totalItems: number;
+  totalBytes: number;
+  systemProtectedBytes: number;
+  userHiddenBytes: number;
+  dotfilesBytes: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+export interface DuplicateFileItem {
+  id: number;
+  path: string;
+  name: string;
+  sizeBytes: number;
+  modifiedAt: number | null;
+  createdAt: number | null;
+}
+
+export interface DuplicateGroup {
+  hash: string;
+  unitSizeBytes: number;
+  copiesCount: number;
+  wastedBytes: number;
+  sampleName: string;
+  files: DuplicateFileItem[];
+}
+
+export interface DuplicateSearchQuery {
+  sessionId?: string;
+  minSizeBytes?: number;
+  extension?: string;
+  limitGroups?: number;
+}
+
+export interface DuplicateSearchResponse {
+  groups: DuplicateGroup[];
+  totalDuplicateFiles: number;
+  totalWastedBytes: number;
+  groupsCount: number;
+  hashingAlgorithm: string;
+}
+
+export interface ForgottenFileItem {
+  id: number;
+  path: string;
+  name: string;
+  extension: string | null;
+  sizeBytes: number;
+  modifiedAt: number | null;
+  ageDays: number;
+  signalType: 'old_download' | 'old_installer' | 'old_backup' | 'old_archive' | 'stale_build_artifact' | string;
+  safetyHeuristic: string;
+}
+
+export interface ForgottenFilesQuery {
+  sessionId?: string;
+  minAgeDays?: number;
+  signalType?: string;
+  page: number;
+  pageSize: number;
+}
+
+export interface ForgottenFilesResponse {
+  items: ForgottenFileItem[];
+  totalItems: number;
+  totalBytes: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+export interface UnknownStorageItem {
+  path: string;
+  isDirectory: boolean;
+  sizeBytes: number;
+  fileCount: number;
+  extension: string | null;
+  modifiedAt: number | null;
+  confidence: number;
+}
+
+export interface UnknownStorageResponse {
+  items: UnknownStorageItem[];
+  totalUnknownBytes: number;
+  totalUnknownFiles: number;
+  topUnknownDirectories: UnknownStorageItem[];
+}
+

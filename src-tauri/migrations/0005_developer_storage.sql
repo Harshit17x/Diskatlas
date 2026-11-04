@@ -33,3 +33,4 @@ CREATE TABLE IF NOT EXISTS developer_ecosystem_summaries (
 -- 3. Query Indexes
 CREATE INDEX IF NOT EXISTS idx_dev_projects_session ON developer_projects(session_id, total_bytes DESC);
 CREATE INDEX IF NOT EXISTS idx_dev_ecosystems_session ON developer_ecosystem_summaries(session_id);
+
