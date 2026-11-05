@@ -117,6 +117,11 @@ export const useScanStore = create<ScanState>((set, get) => ({
       return null;
     }
 
+    // Initialize visual progress and start live elapsed timer immediately for responsive UI
+    scanStartTime = Date.now();
+    stopElapsedTimer();
+    stopPolling();
+
     set({
       isScanning: true,
       isPaused: false,
@@ -124,55 +129,66 @@ export const useScanStore = create<ScanState>((set, get) => ({
       error: null,
       targetPath: finalPath,
       targetDriveId: finalDriveId,
+      progress: {
+        sessionId: 'starting',
+        driveId: finalDriveId,
+        rootPath: finalPath,
+        status: 'running',
+        filesScanned: 0,
+        dirsScanned: 0,
+        bytesScanned: 0,
+        errorCount: 0,
+        currentPath: finalPath,
+        elapsedMillis: 0,
+      },
     });
 
+    elapsedTimer = setInterval(() => {
+      const { isScanning, isPaused } = get();
+      if (!isScanning) {
+        stopElapsedTimer();
+        return;
+      }
+      if (!isPaused) {
+        const elapsed = Date.now() - scanStartTime;
+        set((s) => (s.progress ? { progress: { ...s.progress, elapsedMillis: elapsed } } : {}));
+      }
+    }, 100);
+
+    console.log('[DiskAtlas] Invoking start_scan IPC...', { finalPath, finalDriveId });
     const res = await safeInvoke<string>('start_scan', {
       path: finalPath,
       driveId: finalDriveId,
       exclusions: state.exclusions.length > 0 ? state.exclusions : null,
     });
+    console.log('[DiskAtlas] start_scan response:', res);
 
     if (res.ok) {
       const sessionId = res.data;
-      set({
+      console.log('[DiskAtlas] Session started successfully:', sessionId);
+      set((s) => ({
         activeSessionId: sessionId,
-        progress: {
-          sessionId,
-          driveId: finalDriveId,
-          rootPath: finalPath,
-          status: 'running',
-          filesScanned: 0,
-          dirsScanned: 0,
-          bytesScanned: 0,
-          errorCount: 0,
-          currentPath: finalPath,
-          elapsedMillis: 0,
-        },
-      });
-
-      // Start active real-time elapsed timer
-      scanStartTime = Date.now();
-      stopElapsedTimer();
-      elapsedTimer = setInterval(() => {
-        const { isScanning, isPaused } = get();
-        if (!isScanning) {
-          stopElapsedTimer();
-          return;
-        }
-        if (!isPaused) {
-          const elapsed = Date.now() - scanStartTime;
-          set((s) => (s.progress ? { progress: { ...s.progress, elapsedMillis: elapsed } } : {}));
-        }
-      }, 100);
+        progress: s.progress
+          ? { ...s.progress, sessionId }
+          : {
+              sessionId,
+              driveId: finalDriveId,
+              rootPath: finalPath,
+              status: 'running',
+              filesScanned: 0,
+              dirsScanned: 0,
+              bytesScanned: 0,
+              errorCount: 0,
+              currentPath: finalPath,
+              elapsedMillis: Date.now() - scanStartTime,
+            },
+      }));
 
       // Start reliable fallback polling heartbeat (every 200ms)
-      stopPolling();
       pollInterval = setInterval(async () => {
         const curSession = get().activeSessionId;
         const scanning = get().isScanning;
-        if (!scanning || !curSession) {
-          stopPolling();
-          stopElapsedTimer();
+        if (!scanning || !curSession || curSession === 'starting') {
           return;
         }
 
@@ -182,27 +198,63 @@ export const useScanStore = create<ScanState>((set, get) => ({
 
         if (pollRes.ok) {
           const p = pollRes.data;
+          const isStillScanning = p.status === 'running' || p.status === 'paused';
+
           set({
             progress: p,
-            isScanning: p.status === 'running' || p.status === 'paused',
+            isScanning: isStillScanning,
             isPaused: p.status === 'paused',
           });
 
-          if (
-            p.status === 'completed' ||
-            p.status === 'completedWithErrors' ||
-            p.status === 'cancelled' ||
-            p.status === 'failed' ||
-            p.status === 'interrupted'
-          ) {
+          if (!isStillScanning) {
             stopPolling();
             stopElapsedTimer();
+
+            // When scan completes via polling heartbeat, finalize summary and trigger analytics pipeline
+            if (p.status === 'completed' || p.status === 'completedWithErrors') {
+              const summary: ScanSummary = {
+                sessionId: p.sessionId,
+                driveId: p.driveId,
+                rootPath: p.rootPath,
+                status: p.status,
+                totalFiles: p.filesScanned,
+                totalDirs: p.dirsScanned,
+                totalBytes: p.bytesScanned,
+                errorCount: p.errorCount,
+                durationMillis: p.elapsedMillis,
+              };
+
+              set({
+                summary,
+                isScanning: false,
+                isPaused: false,
+              });
+
+              // Fetch files & trigger analytics update
+              get().fetchScanFiles(p.sessionId, 1, 50, undefined, 'size', true);
+
+              import('./driveStore').then(({ useDriveStore }) => {
+                useDriveStore.getState().fetchDrives();
+                useDriveStore.getState().fetchDbHealth();
+              });
+              import('./visualizationStore').then(({ useVisualizationStore }) => {
+                useVisualizationStore.getState().fetchAnalytics(p.sessionId);
+              });
+            } else if (p.status === 'failed') {
+              set({
+                isScanning: false,
+                isPaused: false,
+                error: 'Filesystem scan encountered an unexpected failure.',
+              });
+            }
           }
         }
       }, 200);
 
       return sessionId;
     } else {
+      stopElapsedTimer();
+      stopPolling();
       set({
         isScanning: false,
         error: res.error.message || 'Failed to start filesystem scan.',
@@ -307,11 +359,12 @@ export const useScanStore = create<ScanState>((set, get) => ({
       unlistenProgress = await listen<ScanProgress>('scan://progress', (event) => {
         const payload = event.payload;
         set((state) => {
-          // Only update if matching active session
-          if (state.activeSessionId && state.activeSessionId !== payload.sessionId) {
+          // Only update if matching active session (or initializing)
+          if (state.activeSessionId && state.activeSessionId !== 'starting' && state.activeSessionId !== payload.sessionId) {
             return {};
           }
           return {
+            activeSessionId: payload.sessionId,
             progress: payload,
             isScanning: payload.status === 'running' || payload.status === 'paused',
             isPaused: payload.status === 'paused',
@@ -324,10 +377,11 @@ export const useScanStore = create<ScanState>((set, get) => ({
         stopElapsedTimer();
         const summary = event.payload;
         set((state) => {
-          if (state.activeSessionId && state.activeSessionId !== summary.sessionId) {
+          if (state.activeSessionId && state.activeSessionId !== 'starting' && state.activeSessionId !== summary.sessionId) {
             return {};
           }
           return {
+            activeSessionId: summary.sessionId,
             isScanning: false,
             isPaused: false,
             summary,

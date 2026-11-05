@@ -109,7 +109,6 @@ mod tests {
             db_pool.clone(),
             None,
         )
-        .await
         .unwrap();
 
         assert_eq!(summary.status, ScanStatus::Completed);
@@ -135,6 +134,49 @@ mod tests {
         assert!(ext_found, "Should have extracted 'datx9' extension");
 
         // Cleanup temporary test tree
+        let _ = fs::remove_dir_all(&temp_base);
+    }
+
+    #[test]
+    fn test_scan_manager_live_progress() {
+        use std::path::PathBuf;
+        use std::thread::sleep;
+        use std::time::Duration;
+
+        let test_run_id = Uuid::new_v4().to_string();
+        let temp_base = std::env::temp_dir().join(format!("diskatlas_live_{}", test_run_id));
+        fs::create_dir_all(&temp_base).unwrap();
+        let db_path = temp_base.join("test_live.db");
+        let db_pool = DbPool::new(&db_path).unwrap();
+        {
+            let conn_arc = db_pool.conn();
+            let mut conn = conn_arc.lock().unwrap();
+            Migrator::run(&mut conn).unwrap();
+        }
+
+        let manager = ScanManager::new();
+        let session_id = manager.start_scan(
+            PathBuf::from("/"),
+            "Macintosh HD".to_string(),
+            None,
+            db_pool.clone(),
+            None,
+        ).unwrap();
+
+        println!("Started session: {}", session_id);
+
+        for i in 1..=10 {
+            sleep(Duration::from_millis(100));
+            let p = manager.get_progress(&session_id, &db_pool).unwrap();
+            println!("Check #{}: status={:?}, files={}, dirs={}, bytes={}, errors={}, current_path={}",
+                i, p.status, p.files_scanned, p.dirs_scanned, p.bytes_scanned, p.error_count, p.current_path);
+            if p.files_scanned > 0 || p.dirs_scanned > 0 {
+                println!("SUCCESS: Scanned {} files, {} dirs!", p.files_scanned, p.dirs_scanned);
+                break;
+            }
+        }
+
+        manager.cancel_scan(&session_id).unwrap();
         let _ = fs::remove_dir_all(&temp_base);
     }
 }

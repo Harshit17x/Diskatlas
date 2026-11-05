@@ -71,11 +71,12 @@ impl ScanEngine {
         }
     }
 
-    /// Executes the full recursive scan on a background thread.
-    pub async fn run_scan(
+    /// Executes the full recursive scan synchronously on a dedicated OS thread.
+    /// All filesystem I/O is blocking so this MUST run on std::thread::spawn, NOT tokio::spawn.
+    pub fn run_scan(
         options: ScanOptions,
         status: Arc<AtomicU8>,
-        pause_notify: Arc<tokio::sync::Notify>,
+        _pause_notify: Arc<tokio::sync::Notify>,
         progress: Arc<Mutex<ScanProgress>>,
         db_pool: DbPool,
         app_handle: Option<AppHandle>,
@@ -122,16 +123,42 @@ impl ScanEngine {
         let mut dir_stack: Vec<PathBuf> = if options.root_path == std::path::Path::new("/") {
             let mut roots = Vec::new();
             // Note: dir_stack is a LIFO stack. Elements are popped from back to front.
-            // Seeding /Library and /Applications first and /Users last ensures user files are traversed first!
-            let candidates = [
-                "/Library",
-                "/Applications",
-                "/Users",
-            ];
-            for c in &candidates {
-                let p = PathBuf::from(c);
-                if p.exists() {
-                    roots.push(p);
+            // Seeding system directories first and $HOME last ensures user files are traversed first!
+            let opt = PathBuf::from("/opt");
+            if opt.exists() {
+                roots.push(opt);
+            }
+            let usr_local = PathBuf::from("/usr/local");
+            if usr_local.exists() {
+                roots.push(usr_local);
+            }
+            let lib = PathBuf::from("/Library");
+            if lib.exists() {
+                roots.push(lib);
+            }
+            let apps = PathBuf::from("/Applications");
+            if apps.exists() {
+                roots.push(apps);
+            }
+            let shared = PathBuf::from("/Users/Shared");
+            if shared.exists() {
+                roots.push(shared);
+            }
+            // Seed any additional user profiles in /Users if accessible
+            if let Ok(entries) = fs::read_dir("/Users") {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_dir() && !roots.contains(&p) {
+                        roots.push(p);
+                    }
+                }
+            }
+            // Always seed current user's HOME directory last so it is popped FIRST from the stack!
+            if let Ok(home) = std::env::var("HOME") {
+                let home_path = PathBuf::from(&home);
+                if home_path.exists() {
+                    roots.retain(|r| r != &home_path);
+                    roots.push(home_path);
                 }
             }
             if roots.is_empty() {
@@ -158,7 +185,8 @@ impl ScanEngine {
         let mut dirs_scanned: u64 = 0;
         let mut bytes_scanned: u64 = 0;
         let mut error_count: u64 = 0;
-        let mut last_emit = Instant::now();
+        // Initialize last_emit 200ms in the past so the first visited directory immediately emits live feedback to UI
+        let mut last_emit = Instant::now().checked_sub(Duration::from_millis(200)).unwrap_or_else(Instant::now);
         let mut loop_counter: usize = 0;
 
         // Immediately emit initial progress event so UI receives active scanning feedback
@@ -196,9 +224,9 @@ impl ScanEngine {
                 false,
             );
 
-            // Cooperative yielding to prevent monopolizing the Tokio executor and starving UI queries
-            if loop_counter % 64 == 0 {
-                tokio::task::yield_now().await;
+            // Cooperative yielding on dedicated OS thread to avoid CPU monopolization
+            if loop_counter % 32 == 0 {
+                std::thread::yield_now();
             }
 
             // Check cancellation
@@ -221,10 +249,10 @@ impl ScanEngine {
                 });
             }
 
-            // Check pause
+            // Check pause — poll atomically on the dedicated OS thread
             while status.load(Ordering::SeqCst) == STATUS_PAUSED {
-                debug!("Scan session '{}' paused, waiting for resume notification...", options.session_id);
-                pause_notify.notified().await;
+                debug!("Scan session '{}' paused, sleeping...", options.session_id);
+                std::thread::sleep(Duration::from_millis(50));
             }
 
             // Check system internal boundary exclusions (e.g. /System/Volumes firmlinks, /Volumes external mounts, /dev)
@@ -470,7 +498,7 @@ impl ScanEngine {
                     if file_batch.len() >= options.batch_size {
                         let mut empty_dirs = Vec::new();
                         Self::flush_batches(&db_pool, &options.session_id, &mut file_batch, &mut empty_dirs, &mut error_batch)?;
-                        tokio::task::yield_now().await;
+                        std::thread::yield_now();
                     }
 
                     // Throttle in-batch progress updates for large directories (every 250 files)

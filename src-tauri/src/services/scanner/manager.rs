@@ -105,35 +105,39 @@ impl ScanManager {
             batch_size: 2500,
         };
 
-        // Spawn background async task
+        // Spawn on a dedicated OS thread — the scan engine performs blocking filesystem I/O
+        // (std::fs::read_dir, symlink_metadata) that would starve the Tauri tokio runtime if run
+        // inside tokio::spawn. A real OS thread runs independently of the async executor.
         let sid_err = session_id.clone();
         let status_err = Arc::clone(&status);
         let progress_err = Arc::clone(&progress);
         let handle_err = app_handle.clone();
-        tokio::spawn(async move {
-            let res = ScanEngine::run_scan(
-                options,
-                status,
-                pause_notify,
-                progress,
-                db_pool,
-                app_handle,
-            )
-            .await;
+        std::thread::Builder::new()
+            .name(format!("diskatlas-scan-{}", &session_id[..8]))
+            .spawn(move || {
+                let res = ScanEngine::run_scan(
+                    options,
+                    status,
+                    pause_notify,
+                    progress,
+                    db_pool,
+                    app_handle,
+                );
 
-            if let Err(err) = res {
-                tracing::error!("ScanEngine error on session '{}': {:?}", sid_err, err);
-                status_err.store(crate::services::scanner::engine::STATUS_FAILED, Ordering::SeqCst);
-                {
-                    let mut p = progress_err.lock().unwrap();
-                    p.status = ScanStatus::Failed;
+                if let Err(err) = res {
+                    tracing::error!("ScanEngine error on session '{}': {:?}", sid_err, err);
+                    status_err.store(crate::services::scanner::engine::STATUS_FAILED, Ordering::SeqCst);
+                    {
+                        let mut p = progress_err.lock().unwrap();
+                        p.status = ScanStatus::Failed;
+                    }
+                    if let Some(ref handle) = handle_err {
+                        use tauri::Emitter;
+                        handle.emit("scan://error", &err.to_string()).ok();
+                    }
                 }
-                if let Some(ref handle) = handle_err {
-                    use tauri::Emitter;
-                    handle.emit("scan://error", &err.to_string()).ok();
-                }
-            }
-        });
+            })
+            .map_err(|e| AppError::System(format!("Failed to spawn scan thread: {}", e)))?;
 
         Ok(session_id)
     }
