@@ -186,7 +186,7 @@ export const CommandPalette: React.FC = () => {
         onClick={(e) => e.stopPropagation()}
       >
         {/* Search Input Bar */}
-        <div className="flex items-center px-4 py-3 border-b border-border bg-[#14161A]">
+        <div className="flex items-center px-4 py-3 border-b border-border bg-elevated">
           <Search className="w-4 h-4 text-muted mr-3 flex-shrink-0" />
           <input
             ref={inputRef}
@@ -238,7 +238,7 @@ export const CommandPalette: React.FC = () => {
                   {cmd.shortcut && (
                     <span
                       className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${
-                        isSelected ? 'bg-white/20 text-white' : 'bg-[#14161A] text-muted border border-border'
+                        isSelected ? 'bg-white/20 text-white' : 'bg-elevated text-muted border border-border'
                       }`}
                     >
                       {cmd.shortcut}
@@ -255,7 +255,7 @@ export const CommandPalette: React.FC = () => {
         </div>
 
         {/* Footer info */}
-        <div className="px-4 py-2 border-t border-border bg-[#14161A] flex items-center justify-between text-[11px] text-muted">
+        <div className="px-4 py-2 border-t border-border bg-elevated flex items-center justify-between text-[11px] text-muted">
           <span>Use ↑ ↓ to navigate</span>
           <span>Press Enter to select</span>
         </div>

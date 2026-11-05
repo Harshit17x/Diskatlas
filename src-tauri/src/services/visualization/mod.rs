@@ -202,7 +202,23 @@ impl VisualizationService {
         conn: &Connection,
         session_id: Option<&str>,
     ) -> Result<StorageAnalyticsData> {
-        let sid = Self::resolve_session_id(conn, session_id)?;
+        let sid = match Self::resolve_session_id(conn, session_id) {
+            Ok(s) => s,
+            Err(_) => {
+                // If no session exists, return an empty analytics model immediately without failing or blocking
+                return Ok(StorageAnalyticsData {
+                    session_id: String::new(),
+                    total_bytes: 0,
+                    total_files: 0,
+                    category_distribution: Vec::new(),
+                    extension_distribution: Vec::new(),
+                    largest_directories: Vec::new(),
+                    application_storage: Vec::new(),
+                    developer_storage: Vec::new(),
+                    history_trends: Vec::new(),
+                });
+            }
+        };
 
         let (total_bytes, total_files): (i64, i64) = conn.query_row(
             "SELECT COALESCE(total_bytes, 0), COALESCE(total_files, 0)
@@ -429,12 +445,14 @@ impl VisualizationService {
     /// Resolves target session id, falling back to latest session
     fn resolve_session_id(conn: &Connection, requested: Option<&str>) -> Result<String> {
         if let Some(id) = requested {
-            return Ok(id.to_string());
+            if !id.trim().is_empty() {
+                return Ok(id.to_string());
+            }
         }
 
         let latest: Option<String> = conn
             .query_row(
-                "SELECT id FROM scan_sessions ORDER BY started_at DESC LIMIT 1",
+                "SELECT id FROM scan_sessions WHERE status IN ('completed', 'interrupted') ORDER BY started_at DESC LIMIT 1",
                 [],
                 |row| row.get(0),
             )

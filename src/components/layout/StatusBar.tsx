@@ -8,7 +8,7 @@ export const StatusBar: React.FC = () => {
   const selectedDrive = drives.find((d) => d.id === selectedDriveId) || drives[0];
 
   return (
-    <footer className="h-6 border-t border-border bg-[#121417] px-3 flex items-center justify-between text-[11px] text-muted select-none z-20 font-mono">
+    <footer className="h-6 border-t border-border bg-sidebar px-3 flex items-center justify-between text-[11px] text-muted select-none z-20 font-mono">
       {/* Left: Storage Engine Status */}
       <div className="flex items-center gap-4">
         {/* Active Volume */}

@@ -88,7 +88,7 @@ export const Sidebar: React.FC = () => {
               className={`w-full flex items-center gap-2.5 px-3 py-1.5 text-xs font-medium rounded transition-colors ${
                 isActive
                   ? 'bg-elevated text-primary font-semibold border-l-2 border-accent'
-                  : 'text-secondary hover:text-primary hover:bg-[#1A1D23] border-l-2 border-transparent'
+                  : 'text-secondary hover:text-primary hover:bg-elevated border-l-2 border-transparent'
               }`}
             >
               <span className={`flex-shrink-0 ${isActive ? 'text-accent' : 'text-muted'}`}>
@@ -117,7 +117,7 @@ export const Sidebar: React.FC = () => {
     >
       {/* Top Application Header */}
       <div className="flex flex-col flex-1 overflow-hidden">
-        <div className="h-12 border-b border-border flex items-center px-3.5 gap-2.5 bg-[#121417]">
+        <div className="h-12 border-b border-border flex items-center px-3.5 gap-2.5 bg-sidebar">
           <div className="w-6 h-6 rounded bg-accent flex items-center justify-center text-white flex-shrink-0 shadow-sm">
             <HardDrive className="w-3.5 h-3.5 font-bold" />
           </div>
@@ -142,7 +142,7 @@ export const Sidebar: React.FC = () => {
       </div>
 
       {/* Bottom Status / Collapse Bar */}
-      <div className="p-2 border-t border-border bg-[#121417] space-y-1">
+      <div className="p-2 border-t border-border bg-sidebar space-y-1">
         {!sidebarCollapsed && dbHealth && (
           <div className="px-2 py-1 flex items-center justify-between text-[10px] text-muted font-mono">
             <div className="flex items-center gap-1.5 truncate">

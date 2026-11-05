@@ -50,7 +50,7 @@ export const Modal: React.FC<ModalProps> = ({
         className={`w-full ${maxWidthStyles[maxWidth]} bg-panel border border-border rounded shadow-2xl flex flex-col overflow-hidden text-primary animate-in fade-in zoom-in-95 duration-100`}
       >
         {/* Header */}
-        <div className="px-5 py-4 border-b border-border flex items-start justify-between bg-[#171A1F]">
+        <div className="px-5 py-4 border-b border-border flex items-start justify-between bg-elevated">
           <div>
             <h2 className="text-sm font-semibold text-primary">{title}</h2>
             {description && (
@@ -73,7 +73,7 @@ export const Modal: React.FC<ModalProps> = ({
 
         {/* Footer */}
         {footer && (
-          <div className="px-5 py-3 border-t border-border bg-[#171A1F] flex items-center justify-end gap-2">
+          <div className="px-5 py-3 border-t border-border bg-elevated flex items-center justify-end gap-2">
             {footer}
           </div>
         )}

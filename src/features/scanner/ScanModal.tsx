@@ -236,7 +236,7 @@ export const ScanModal: React.FC = () => {
             <select
               value={targetDriveId}
               onChange={handleDriveChange}
-              className="w-full bg-[#131518] border border-border rounded px-3 py-2 text-xs text-primary focus:outline-none focus:border-accent"
+              className="w-full bg-elevated border border-border rounded px-3 py-2 text-xs text-primary focus:outline-none focus:border-accent"
             >
               {drives.map((d) => (
                 <option key={d.id} value={d.id}>
@@ -258,7 +258,7 @@ export const ScanModal: React.FC = () => {
               value={targetPath}
               onChange={(e) => setTargetPath(e.target.value)}
               placeholder="e.g. C:\ or /Users/username/Projects"
-              className="w-full bg-[#131518] border border-border rounded px-3 py-2 font-mono text-xs text-primary focus:outline-none focus:border-accent"
+              className="w-full bg-elevated border border-border rounded px-3 py-2 font-mono text-xs text-primary focus:outline-none focus:border-accent"
             />
             <p className="text-[11px] text-muted">
               Recursively visits subdirectories starting from this path. Symlink cycles and reparse junctions are automatically detected and safely skipped.
@@ -309,7 +309,7 @@ export const ScanModal: React.FC = () => {
                   onChange={(e) => setCustomExclusion(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && addCustomExclusion()}
                   placeholder="e.g. .venv or target"
-                  className="flex-1 bg-[#131518] border border-border rounded px-2.5 py-1.5 text-xs text-primary focus:outline-none focus:border-accent"
+                  className="flex-1 bg-elevated border border-border rounded px-2.5 py-1.5 text-xs text-primary focus:outline-none focus:border-accent"
                 />
                 <Button size="sm" variant="outline" onClick={addCustomExclusion}>
                   Add Exclusion
@@ -342,7 +342,7 @@ export const ScanModal: React.FC = () => {
 
           {/* Metric Counter Cards */}
           <div className="grid grid-cols-4 gap-2">
-            <div className="bg-[#14161A] p-3 border border-border rounded">
+            <div className="bg-elevated p-3 border border-border rounded">
               <div className="flex items-center gap-1.5 text-muted mb-1 text-[11px]">
                 <Files className="w-3 h-3 text-accent" />
                 Files Scanned
@@ -352,7 +352,7 @@ export const ScanModal: React.FC = () => {
               </div>
             </div>
 
-            <div className="bg-[#14161A] p-3 border border-border rounded">
+            <div className="bg-elevated p-3 border border-border rounded">
               <div className="flex items-center gap-1.5 text-muted mb-1 text-[11px]">
                 <FolderTree className="w-3 h-3 text-secondary" />
                 Folders
@@ -362,7 +362,7 @@ export const ScanModal: React.FC = () => {
               </div>
             </div>
 
-            <div className="bg-[#14161A] p-3 border border-border rounded">
+            <div className="bg-elevated p-3 border border-border rounded">
               <div className="flex items-center gap-1.5 text-muted mb-1 text-[11px]">
                 <Database className="w-3 h-3 text-success" />
                 Logical Size
@@ -372,7 +372,7 @@ export const ScanModal: React.FC = () => {
               </div>
             </div>
 
-            <div className="bg-[#14161A] p-3 border border-border rounded">
+            <div className="bg-elevated p-3 border border-border rounded">
               <div className="flex items-center gap-1.5 text-muted mb-1 text-[11px]">
                 <AlertTriangle className="w-3 h-3 text-warning" />
                 Errors / Skips
@@ -384,7 +384,7 @@ export const ScanModal: React.FC = () => {
           </div>
 
           {/* Current Path Monospace Line */}
-          <div className="p-2.5 bg-[#121316] border border-border/80 rounded space-y-1">
+          <div className="p-2.5 bg-elevated border border-border/80 rounded space-y-1">
             <div className="text-[10px] uppercase tracking-wider text-muted font-medium">
               Current Directory
             </div>
@@ -467,7 +467,7 @@ export const ScanModal: React.FC = () => {
             </div>
           )}
 
-          <div className="p-2.5 bg-[#121316] border border-border/80 rounded space-y-1 text-xs">
+          <div className="p-2.5 bg-elevated border border-border/80 rounded space-y-1 text-xs">
             <span className="text-muted block text-[10px] uppercase tracking-wider">Indexed Root</span>
             <span className="font-mono text-secondary break-all">{summary.rootPath}</span>
           </div>

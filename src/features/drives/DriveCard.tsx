@@ -146,7 +146,7 @@ export const DriveCard: React.FC<DriveCardProps> = ({
                 </span>
               </div>
 
-              <div className="h-1.5 w-full bg-[#121417] rounded-sm overflow-hidden border border-border">
+              <div className="h-1.5 w-full bg-elevated rounded-sm overflow-hidden border border-border">
                 <div
                   className={`h-full rounded-sm transition-all duration-300 ${
                     drive.usedPercent !== null ? getProgressColor(drive.usedPercent) : 'bg-accent'
@@ -163,7 +163,7 @@ export const DriveCard: React.FC<DriveCardProps> = ({
               </div>
             </>
           ) : (
-            <div className="py-2.5 px-3 bg-[#15171B] border border-border rounded text-[11px] text-muted font-mono text-center">
+            <div className="py-2.5 px-3 bg-elevated border border-border rounded text-[11px] text-muted font-mono text-center">
               Capacity unavailable (Unmounted or empty media)
             </div>
           )}

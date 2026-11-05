@@ -35,3 +35,16 @@ export function formatNumber(count: number): string {
   return new Intl.NumberFormat().format(count);
 }
 
+/**
+ * Formats duration milliseconds into elapsed human-readable clock format (e.g. "2m 14s", "45s")
+ */
+export function formatElapsed(millis: number): string {
+  const totalSeconds = Math.floor(millis / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
+}
+

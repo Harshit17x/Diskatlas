@@ -8,32 +8,32 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Design system palette (Linear / Raycast / Professional Desktop utility)
-        canvas: '#101114',
-        sidebar: '#15171B',
-        panel: '#1B1E23',
-        elevated: '#22262C',
-        border: '#2D323A',
-        'border-light': '#3B414C',
-        primary: '#F1F3F5',
-        secondary: '#9BA3AE',
-        muted: '#69717D',
+        // Dynamic design system palette powered by CSS variables (supports Light & Dark modes)
+        canvas: 'rgb(var(--canvas) / <alpha-value>)',
+        sidebar: 'rgb(var(--sidebar) / <alpha-value>)',
+        panel: 'rgb(var(--panel) / <alpha-value>)',
+        elevated: 'rgb(var(--elevated) / <alpha-value>)',
+        border: 'rgb(var(--border) / <alpha-value>)',
+        'border-light': 'rgb(var(--border-light) / <alpha-value>)',
+        primary: 'rgb(var(--primary) / <alpha-value>)',
+        secondary: 'rgb(var(--secondary) / <alpha-value>)',
+        muted: 'rgb(var(--muted) / <alpha-value>)',
         accent: {
-          DEFAULT: '#5687E8',
-          hover: '#4877D9',
-          muted: 'rgba(86, 135, 232, 0.12)',
+          DEFAULT: 'rgb(var(--accent) / <alpha-value>)',
+          hover: 'rgb(var(--accent-hover) / <alpha-value>)',
+          muted: 'rgba(var(--accent-muted), 0.12)',
         },
         success: {
-          DEFAULT: '#27AE82',
-          muted: 'rgba(39, 174, 130, 0.12)',
+          DEFAULT: '#10b981',
+          muted: 'rgba(16, 185, 129, 0.12)',
         },
         warning: {
-          DEFAULT: '#E5A54B',
-          muted: 'rgba(229, 165, 75, 0.12)',
+          DEFAULT: '#f59e0b',
+          muted: 'rgba(245, 158, 11, 0.12)',
         },
         danger: {
-          DEFAULT: '#DB6262',
-          muted: 'rgba(219, 98, 98, 0.12)',
+          DEFAULT: '#ef4444',
+          muted: 'rgba(239, 68, 68, 0.12)',
         },
       },
       fontFamily: {

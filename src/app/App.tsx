@@ -21,9 +21,18 @@ import { useDriveStore } from '../stores/driveStore';
 import { useScanStore } from '../stores/scanStore';
 
 export const App: React.FC = () => {
-  const { activeTab, setActiveTab } = useUIStore();
+  const { activeTab, setActiveTab, theme } = useUIStore();
   const { fetchDrives, fetchSystemInfo, fetchDbHealth } = useDriveStore();
   const { setupEventListeners } = useScanStore();
+
+  // Sync theme class to document element
+  useEffect(() => {
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+  }, [theme]);
 
   useEffect(() => {
     fetchDrives();

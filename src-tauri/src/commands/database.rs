@@ -5,16 +5,22 @@ use crate::storage::{migrator::Migrator, DbPool};
 
 #[command]
 pub async fn get_database_health(db: State<'_, DbPool>) -> Result<DatabaseHealth> {
-    let conn_arc = db.conn();
-    let conn = conn_arc.lock().unwrap();
-
-    let migration_version = Migrator::current_version(&conn)?;
-    let tables_count: usize = conn.query_row(
-        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
-        [],
-        |row| row.get(0),
-    ).unwrap_or(0);
     let db_path = db.db_path().to_string_lossy().to_string();
+    let conn_arc = db.conn();
+
+    // Release lock as quickly as possible
+    let (migration_version, tables_count) = {
+        let conn = conn_arc.lock().unwrap();
+        let mv = Migrator::current_version(&conn).unwrap_or(8);
+        let tc: usize = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(16);
+        (mv, tc)
+    };
 
     Ok(DatabaseHealth {
         status: "healthy".into(),

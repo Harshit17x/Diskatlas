@@ -270,6 +270,15 @@ export const useScanStore = create<ScanState>((set, get) => ({
 
         // Automatically fetch first page of indexed files
         get().fetchScanFiles(summary.sessionId, 1, 50, undefined, 'size', true);
+
+        // Real-time synchronization: automatically refresh drives and storage analytics
+        import('./driveStore').then(({ useDriveStore }) => {
+          useDriveStore.getState().fetchDrives();
+          useDriveStore.getState().fetchDbHealth();
+        });
+        import('./visualizationStore').then(({ useVisualizationStore }) => {
+          useVisualizationStore.getState().fetchAnalytics(summary.sessionId);
+        });
       });
     } catch (err) {
       console.warn('Could not register Tauri scan event listeners:', err);

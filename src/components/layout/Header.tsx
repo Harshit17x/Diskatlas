@@ -5,13 +5,15 @@ import {
   Settings,
   ShieldCheck,
   Disc,
+  Sun,
+  Moon,
 } from 'lucide-react';
 import { useUIStore } from '../../stores/uiStore';
 import { useDriveStore } from '../../stores/driveStore';
 import { Badge } from '../common/Badge';
 
 export const Header: React.FC = () => {
-  const { activeTab, setActiveTab, setCommandPaletteOpen } = useUIStore();
+  const { activeTab, setActiveTab, setCommandPaletteOpen, theme, toggleTheme } = useUIStore();
   const {
     drives,
     selectedDriveId,
@@ -88,7 +90,7 @@ export const Header: React.FC = () => {
             <Search className="w-3.5 h-3.5 text-muted" />
             <span>Search or jump to...</span>
           </div>
-          <kbd className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-border bg-[#14161A] text-secondary">
+          <kbd className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-border bg-elevated text-secondary">
             ⌘K
           </kbd>
         </button>
@@ -119,6 +121,19 @@ export const Header: React.FC = () => {
           className="p-1.5 rounded text-secondary hover:text-primary hover:bg-elevated transition-colors disabled:opacity-50"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin text-accent' : ''}`} />
+        </button>
+
+        {/* Light / Dark Mode Toggle */}
+        <button
+          onClick={toggleTheme}
+          title={theme === 'light' ? 'Switch to Dark Mode' : 'Switch to Light Mode'}
+          className="p-1.5 rounded text-secondary hover:text-primary hover:bg-elevated transition-colors"
+        >
+          {theme === 'light' ? (
+            <Moon className="w-3.5 h-3.5 text-secondary hover:text-primary" />
+          ) : (
+            <Sun className="w-3.5 h-3.5 text-warning" />
+          )}
         </button>
 
         {/* Quick Settings Shortcut */}

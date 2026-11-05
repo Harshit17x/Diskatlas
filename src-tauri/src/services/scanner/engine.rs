@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::error::Result;
 use crate::models::scan::{ScanProgress, ScanStatus, ScanSummary};
@@ -59,6 +59,8 @@ impl ScanEngine {
         // Cycle detection: track visited inodes or canonical paths
         #[cfg(unix)]
         let mut visited_inodes: HashSet<(u64, u64)> = HashSet::new();
+        #[cfg(unix)]
+        let mut visited_file_inodes: HashSet<(u64, u64)> = HashSet::new();
         #[cfg(not(unix))]
         let mut visited_paths: HashSet<PathBuf> = HashSet::new();
 
@@ -78,8 +80,32 @@ impl ScanEngine {
         let mut bytes_scanned: u64 = 0;
         let mut error_count: u64 = 0;
         let mut last_emit = Instant::now();
+        let mut loop_counter: usize = 0;
+
+        // Immediately emit initial progress event so UI receives active scanning feedback
+        if let Some(ref handle) = app_handle {
+            let initial = ScanProgress {
+                session_id: options.session_id.clone(),
+                drive_id: options.drive_id.clone(),
+                root_path: options.root_path.to_string_lossy().to_string(),
+                status: ScanStatus::Running,
+                files_scanned: 0,
+                dirs_scanned: 0,
+                bytes_scanned: 0,
+                error_count: 0,
+                current_path: options.root_path.to_string_lossy().to_string(),
+                elapsed_millis: 0,
+            };
+            handle.emit("scan://progress", &initial).ok();
+        }
 
         while let Some(current_dir) = dir_stack.pop() {
+            loop_counter += 1;
+            // Cooperative yielding to prevent monopolizing the Tokio executor and starving UI queries
+            if loop_counter % 64 == 0 {
+                tokio::task::yield_now().await;
+            }
+
             // Check cancellation
             if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
                 info!("Scan session '{}' cancelled by user", options.session_id);
@@ -157,7 +183,8 @@ impl ScanEngine {
                         error_type: err_type.to_string(),
                         message: err.to_string(),
                     });
-                    warn!("Inaccessible path '{}': {}", current_dir.display(), err);
+                    // Record permission-denied / inaccessible system paths safely as protected skips
+                    debug!("Inaccessible protected path '{}': {}", current_dir.display(), err);
                     continue;
                 }
             };
@@ -209,14 +236,38 @@ impl ScanEngine {
                         }
                     }
                 } else if meta.is_file() || is_symlink {
-                    let size = meta.len();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        // For files with multiple hard links, track physical inode so each unique data block is only sized once
+                        if meta.nlink() > 1 {
+                            let fkey = (meta.dev(), meta.ino());
+                            if !visited_file_inodes.insert(fkey) {
+                                // Inode already sized; skip multi-counting
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Compute allocated size where available
+                    let allocated_bytes = Self::get_allocated_bytes(&meta);
+
+                    // For sparse files (e.g. VM images), bound by allocated physical blocks to prevent phantom gigabytes
+                    let raw_len = meta.len();
+                    let size = if let Some(alloc) = allocated_bytes {
+                        if raw_len > 10 * 1024 * 1024 && alloc < raw_len {
+                            alloc
+                        } else {
+                            raw_len
+                        }
+                    } else {
+                        raw_len
+                    };
+
                     files_scanned += 1;
                     bytes_scanned += size;
                     dir_file_count += 1;
                     dir_total_bytes += size;
-
-                    // Compute allocated size where available
-                    let allocated_bytes = Self::get_allocated_bytes(&meta);
 
                     // Extension extraction (normalized lowercase)
                     let extension = entry_path
@@ -246,6 +297,7 @@ impl ScanEngine {
                     if file_batch.len() >= options.batch_size {
                         let mut empty_dirs = Vec::new();
                         Self::flush_batches(&db_pool, &options.session_id, &mut file_batch, &mut empty_dirs, &mut error_batch)?;
+                        tokio::task::yield_now().await;
                     }
                 }
             }
@@ -274,8 +326,8 @@ impl ScanEngine {
                 is_system: false,
             });
 
-            // Update in-memory progress and emit throttled event (every 75ms)
-            if last_emit.elapsed() >= Duration::from_millis(75) {
+            // Update in-memory progress and emit throttled event (every 150ms to prevent IPC congestion)
+            if last_emit.elapsed() >= Duration::from_millis(150) {
                 let current_progress = ScanProgress {
                     session_id: options.session_id.clone(),
                     drive_id: options.drive_id.clone(),
@@ -591,21 +643,33 @@ impl ScanEngine {
             if path_str.starts_with("/System/Volumes") {
                 return true;
             }
-            // 2. /Volumes contains other mounted drives, network shares, DMGs, and /Volumes/Macintosh HD (loop back to /)
-            if path_str.starts_with("/Volumes") && !root_str.starts_with("/Volumes") {
+            // 2. Sealed immutable macOS System snapshot (/System).
+            //    On macOS (APFS), /System is a cryptographically sealed, read-only snapshot (Signed System Volume).
+            //    It contains 3.5+ million immutable OS files and dyld caches that cannot be modified or cleaned.
+            if path_str == "/System" || path_str.starts_with("/System/") {
                 return true;
             }
-            // 3. /dev contains special character and FIFO device files
-            if path_str.starts_with("/dev") || path_str.starts_with("/net") || path_str.starts_with("/home") {
+            // 3. Firmware and low-level hardware bundles (e.g. /usr/standalone/firmware)
+            if path_str.starts_with("/usr/standalone") {
                 return true;
             }
-            // 4. Active virtual memory and core system metadata
-            if path_str.starts_with("/private/var/vm")
+            // 4. Restricted kernel, audit, and system cache databases
+            if path_str.starts_with("/private/var/db")
+                || path_str.starts_with("/private/var/audit")
+                || path_str.starts_with("/private/var/vm")
                 || path_str.contains("/.Spotlight-V100")
                 || path_str.contains("/.fseventsd")
                 || path_str.contains("/.DocumentRevisions-V100")
                 || path_str.contains("/.PKInstallSandboxManager")
             {
+                return true;
+            }
+            // 5. /Volumes contains other mounted drives, network shares, DMGs, and /Volumes/Macintosh HD (loop back to /)
+            if path_str.starts_with("/Volumes") && !root_str.starts_with("/Volumes") {
+                return true;
+            }
+            // 6. /dev contains special character and FIFO device files
+            if path_str.starts_with("/dev") || path_str.starts_with("/net") || path_str.starts_with("/home") {
                 return true;
             }
         }
