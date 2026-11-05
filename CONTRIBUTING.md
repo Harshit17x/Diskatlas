@@ -1,32 +1,32 @@
-# Contributing to DiskAtlas 🧭
+# Contributing to DiskAtlas
 
-Thank you for your interest in contributing to **DiskAtlas**! We welcome contributions from developers, designers, technical writers, and testers of all skill levels.
-
----
-
-## 🌟 How You Can Contribute
-
-There are many ways to contribute to DiskAtlas:
-1. **Reporting Bugs**: Let us know if you find incorrect calculations, scanner errors, or UI glitches.
-2. **Feature Requests**: Suggest ideas to improve developer storage intelligence, visualizations, or workflows.
-3. **Adding Developer Ecosystems**: Help us detect more build caches, dependencies, or IDE storage.
-4. **Documentation**: Improve guides, fix typos, and add platform-specific instructions.
-5. **Translations**: Help localize DiskAtlas into more languages.
-6. **Code Contributions**: Submit PRs for open issues or performance enhancements.
+Thank you for your interest in contributing to DiskAtlas. We welcome contributions from developers, designers, technical writers, and testers.
 
 ---
 
-## 🛠️ Development Environment Setup
+## Areas of Contribution
 
-### 1. Prerequisites
+You can contribute to DiskAtlas in several ways:
+1. **Bug Reports**: Document unexpected behavior, incorrect storage measurements, or user interface errors.
+2. **Feature Proposals**: Suggest capabilities to improve developer storage discovery, visualizations, or workflows.
+3. **Developer Ecosystem Support**: Add or improve detection rules for compilers, package managers, and development runtimes.
+4. **Documentation**: Clarify guides, improve setup instructions, and update platform-specific build notes.
+5. **Localization**: Assist in translating user-facing strings into additional languages.
+6. **Code Contributions**: Address open issues, optimize database queries, or enhance scanner throughput.
+
+---
+
+## Development Environment Setup
+
+### Prerequisites
 - **Node.js**: v20+ LTS
 - **Rust & Cargo**: v1.80+ ([rustup.rs](https://rustup.rs))
 - **Platform Dependencies**:
   - **macOS**: `xcode-select --install`
-  - **Windows**: Visual Studio 2022 C++ Build Tools & WebView2 runtime
+  - **Windows**: Visual Studio 2022 C++ Build Tools and WebView2 runtime
   - **Linux**: `libwebkit2gtk-4.1-dev`, `build-essential`, `libssl-dev`
 
-### 2. Getting the Code
+### Getting the Code
 
 ```bash
 # 1. Fork the repository on GitHub
@@ -37,39 +37,48 @@ cd Diskatlas
 # 3. Install frontend dependencies
 npm install
 
-# 4. Verify the backend test suite passes
+# 4. Verify that the backend test suite passes
 cargo test --manifest-path src-tauri/Cargo.toml
 
-# 5. Launch DiskAtlas in development mode with hot-reload
+# 5. Launch DiskAtlas in development mode with hot reload
 npm run tauri dev
 ```
 
 ---
 
-## 🧑‍💻 Code Style Guidelines
+## Code Style and Quality Standards
 
-- **Rust**: Format with `cargo fmt`. Lint with `cargo clippy`. Ensure all tests pass.
-- **TypeScript & React**: Format with Prettier. Adhere to strict TypeScript without `any`.
-- **Safety First**: Destructive operations must NEVER delete files without user confirmation. System-protected paths must remain guarded.
-- **Zero Telemetry**: We never add third-party analytics, tracking pixels, or remote telemetry SDKs.
+- **Rust**:
+  - Format code using `cargo fmt`.
+  - Check for linter warnings with `cargo clippy`.
+  - Ensure all 25 unit and integration tests pass: `cargo test --manifest-path src-tauri/Cargo.toml`.
+- **TypeScript & React**:
+  - Adhere to strict TypeScript typing; avoid using `any`.
+  - Format code with Prettier and verify linting with `npm run lint`.
+- **Safety**:
+  - Destructive filesystem operations must never execute automatically.
+  - Deletions must support reversible trash or Recycle Bin routing by default.
+  - Critical operating system paths must remain protected.
+- **Privacy**:
+  - Do not add remote tracking, analytics SDKs, or background telemetry.
 
 ---
 
-## 🚀 Submitting a Pull Request (PR)
+## Submitting Pull Requests
 
 1. **Branch Naming**:
    - `feat/feature-name` for new features
    - `fix/bug-description` for bug fixes
    - `docs/topic-name` for documentation updates
-2. **Commit Messages**: Write clear, descriptive commit messages:
-   - `feat(developer): add support for Elixir _build directory`
-   - `fix(scanner): prevent recursion into pseudo device nodes`
-3. **Test Coverage**: If adding a new feature or fixing a bug, please add corresponding unit tests in `src-tauri/src/services/` or test the frontend thoroughly.
-4. **Open the PR**: Submit your PR against the `main` branch with a clear description of the problem and solution.
+2. **Commit Messages**: Use concise, conventional commit prefixes:
+   - `feat(developer): add detection for Elixir _build directory`
+   - `fix(scanner): prevent traversal into pseudo device nodes`
+   - `docs: update Windows release guide`
+3. **Testing**: Add or update unit tests to verify changes whenever modifying scanner logic, storage classification, or cleanup routines.
+4. **Pull Request Description**: Clearly describe the problem, the solution, and any testing performed across target operating systems.
 
 ---
 
-## 📜 Code of Conduct
+## Code of Conduct
 
-DiskAtlas follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md). Please be respectful and welcoming to all contributors.
-
+DiskAtlas adopts the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md). All contributors and maintainers are expected to uphold a respectful and collaborative environment.
