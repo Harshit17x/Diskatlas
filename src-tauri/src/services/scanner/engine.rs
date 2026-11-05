@@ -36,25 +36,34 @@ impl ScanEngine {
         last_emit: &mut Instant,
         force: bool,
     ) {
-        if force || last_emit.elapsed() >= Duration::from_millis(120) {
-            let current_progress = ScanProgress {
-                session_id: options.session_id.clone(),
-                drive_id: options.drive_id.clone(),
-                root_path: options.root_path.to_string_lossy().to_string(),
-                status: ScanStatus::Running,
-                files_scanned,
-                dirs_scanned,
-                bytes_scanned,
-                error_count,
-                current_path: current_path.to_string_lossy().to_string(),
-                elapsed_millis: start_time.elapsed().as_millis() as u64,
-            };
+        // Always keep the shared in-memory progress struct updated so get_scan_progress queries see live numbers
+        let elapsed_millis = start_time.elapsed().as_millis() as u64;
+        let path_str = current_path.to_string_lossy().to_string();
 
-            if let Ok(mut p) = progress.lock() {
-                *p = current_progress.clone();
-            }
+        if let Ok(mut p) = progress.lock() {
+            p.files_scanned = files_scanned;
+            p.dirs_scanned = dirs_scanned;
+            p.bytes_scanned = bytes_scanned;
+            p.error_count = error_count;
+            p.current_path = path_str.clone();
+            p.elapsed_millis = elapsed_millis;
+        }
 
+        // Throttle UI event emissions over Tauri IPC to prevent webview event starvation
+        if force || last_emit.elapsed() >= Duration::from_millis(100) {
             if let Some(ref handle) = app_handle {
+                let current_progress = ScanProgress {
+                    session_id: options.session_id.clone(),
+                    drive_id: options.drive_id.clone(),
+                    root_path: options.root_path.to_string_lossy().to_string(),
+                    status: ScanStatus::Running,
+                    files_scanned,
+                    dirs_scanned,
+                    bytes_scanned,
+                    error_count,
+                    current_path: path_str,
+                    elapsed_millis,
+                };
                 handle.emit("scan://progress", &current_progress).ok();
             }
 
@@ -112,13 +121,12 @@ impl ScanEngine {
         #[cfg(target_os = "macos")]
         let mut dir_stack: Vec<PathBuf> = if options.root_path == std::path::Path::new("/") {
             let mut roots = Vec::new();
+            // Note: dir_stack is a LIFO stack. Elements are popped from back to front.
+            // Seeding /Library and /Applications first and /Users last ensures user files are traversed first!
             let candidates = [
-                "/Users",
-                "/Applications",
                 "/Library",
-                "/opt",
-                "/usr/local",
-                "/private/tmp",
+                "/Applications",
+                "/Users",
             ];
             for c in &candidates {
                 let p = PathBuf::from(c);
@@ -172,6 +180,22 @@ impl ScanEngine {
 
         while let Some(current_dir) = dir_stack.pop() {
             loop_counter += 1;
+
+            // Emit live progress immediately when visiting a new directory
+            Self::emit_progress_if_needed(
+                &options,
+                files_scanned,
+                dirs_scanned,
+                bytes_scanned,
+                error_count,
+                &current_dir,
+                start_time,
+                &progress,
+                &app_handle,
+                &mut last_emit,
+                false,
+            );
+
             // Cooperative yielding to prevent monopolizing the Tokio executor and starving UI queries
             if loop_counter % 64 == 0 {
                 tokio::task::yield_now().await;
@@ -851,12 +875,12 @@ impl ScanEngine {
             // 5. App sandbox circular aliases in ~/Library/Containers/*/Data/{Desktop,Documents,Downloads,Pictures,Music,Movies}
             //    (Prevent duplicating hundreds of gigabytes of user files)
             if path_str.contains("/Library/Containers/") && path_str.contains("/Data/") {
-                if path_str.ends_with("/Data/Desktop")
-                    || path_str.ends_with("/Data/Documents")
-                    || path_str.ends_with("/Data/Downloads")
-                    || path_str.ends_with("/Data/Pictures")
-                    || path_str.ends_with("/Data/Music")
-                    || path_str.ends_with("/Data/Movies")
+                if path_str.ends_with("/Data/Desktop") || path_str.contains("/Data/Desktop/")
+                    || path_str.ends_with("/Data/Documents") || path_str.contains("/Data/Documents/")
+                    || path_str.ends_with("/Data/Downloads") || path_str.contains("/Data/Downloads/")
+                    || path_str.ends_with("/Data/Pictures") || path_str.contains("/Data/Pictures/")
+                    || path_str.ends_with("/Data/Music") || path_str.contains("/Data/Music/")
+                    || path_str.ends_with("/Data/Movies") || path_str.contains("/Data/Movies/")
                 {
                     return true;
                 }
