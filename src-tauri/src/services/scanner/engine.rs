@@ -65,6 +65,9 @@ impl ScanEngine {
         // Work stack of directories to traverse (avoids call-stack recursion)
         let mut dir_stack: Vec<PathBuf> = vec![options.root_path.clone()];
 
+        // In-memory directory aggregation map for bottom-up recursive sizing
+        let mut dir_map: std::collections::HashMap<String, RawDirItem> = std::collections::HashMap::new();
+
         // Batch buffers for SQLite writes
         let mut file_batch: Vec<RawFileItem> = Vec::with_capacity(options.batch_size);
         let mut dir_batch: Vec<RawDirItem> = Vec::with_capacity(options.batch_size);
@@ -80,6 +83,8 @@ impl ScanEngine {
             // Check cancellation
             if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
                 info!("Scan session '{}' cancelled by user", options.session_id);
+                // Perform bottom-up rollup on whatever was scanned so far before flushing
+                Self::rollup_and_flush_directories(&db_pool, &options.session_id, &mut dir_map, options.batch_size)?;
                 Self::flush_batches(&db_pool, &options.session_id, &mut file_batch, &mut dir_batch, &mut error_batch)?;
                 Self::update_session_status(&db_pool, &options.session_id, ScanStatus::Cancelled, files_scanned, dirs_scanned, bytes_scanned, error_count)?;
                 return Ok(ScanSummary {
@@ -101,7 +106,13 @@ impl ScanEngine {
                 pause_notify.notified().await;
             }
 
-            // Check exclusions
+            // Check system internal boundary exclusions (e.g. /System/Volumes firmlinks, /Volumes external mounts, /dev)
+            if Self::is_system_internal_exclusion(&current_dir, &options.root_path) {
+                debug!("Skipping system internal directory: {}", current_dir.display());
+                continue;
+            }
+
+            // Check user-configured exclusions
             let current_dir_str = current_dir.to_string_lossy();
             if Self::is_excluded(&current_dir_str, &options.exclusions) {
                 debug!("Skipping excluded directory: {}", current_dir.display());
@@ -193,7 +204,9 @@ impl ScanEngine {
                     dir_subdirs += 1;
                     // Do not follow directory symlinks/reparse points to avoid double counting and loops
                     if !is_symlink {
-                        dir_stack.push(entry_path.clone());
+                        if !Self::is_system_internal_exclusion(&entry_path, &options.root_path) {
+                            dir_stack.push(entry_path.clone());
+                        }
                     }
                 } else if meta.is_file() || is_symlink {
                     let size = meta.len();
@@ -231,12 +244,13 @@ impl ScanEngine {
 
                     // Flush batch if buffer is full
                     if file_batch.len() >= options.batch_size {
-                        Self::flush_batches(&db_pool, &options.session_id, &mut file_batch, &mut dir_batch, &mut error_batch)?;
+                        let mut empty_dirs = Vec::new();
+                        Self::flush_batches(&db_pool, &options.session_id, &mut file_batch, &mut empty_dirs, &mut error_batch)?;
                     }
                 }
             }
 
-            // Record directory aggregation
+            // Record directory aggregation in memory map for bottom-up rollup
             let (dir_created, dir_modified) = match fs::metadata(&current_dir) {
                 Ok(m) => Self::get_timestamps(&m),
                 Err(_) => (None, None),
@@ -246,7 +260,8 @@ impl ScanEngine {
             let dir_name = current_dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| current_dir.to_string_lossy().to_string());
             let is_dir_hidden = dir_name.starts_with('.');
 
-            dir_batch.push(RawDirItem {
+            dirs_scanned += 1;
+            dir_map.insert(current_dir.to_string_lossy().to_string(), RawDirItem {
                 path: current_dir.to_string_lossy().to_string(),
                 name: dir_name,
                 parent_path: dir_parent,
@@ -287,8 +302,12 @@ impl ScanEngine {
             }
         }
 
-        // Final flush of remaining batch records
-        Self::flush_batches(&db_pool, &options.session_id, &mut file_batch, &mut dir_batch, &mut error_batch)?;
+        // Final flush of remaining file and error records
+        let mut empty_dir_batch = Vec::new();
+        Self::flush_batches(&db_pool, &options.session_id, &mut file_batch, &mut empty_dir_batch, &mut error_batch)?;
+
+        // Perform bottom-up directory rollup so parent directories reflect true recursive size
+        Self::rollup_and_flush_directories(&db_pool, &options.session_id, &mut dir_map, options.batch_size)?;
 
         // Determine final completion status
         let final_status = if error_count > 0 {
@@ -306,6 +325,23 @@ impl ScanEngine {
             bytes_scanned,
             error_count,
         )?;
+
+        // Automated post-scan intelligence pipeline:
+        // 1. Storage Classification Engine
+        info!("Running automated post-scan classification for session '{}'", options.session_id);
+        let _ = crate::services::classifier::ClassifierService::classify_and_persist_session(&db_pool, &options.session_id);
+
+        // 2. Developer Storage Intelligence
+        info!("Running automated developer storage discovery for session '{}'", options.session_id);
+        let _ = crate::services::developer::DeveloperService::analyze_developer_storage(&db_pool, &options.session_id);
+
+        // 3. Storage Intelligence Recommendations
+        info!("Generating storage intelligence recommendations for session '{}'", options.session_id);
+        {
+            let conn_arc = db_pool.conn();
+            let conn = conn_arc.lock().unwrap();
+            let _ = crate::services::intelligence::IntelligenceService::generate_intelligence_profile(&conn, Some(&options.session_id));
+        }
 
         let final_summary = ScanSummary {
             session_id: options.session_id.clone(),
@@ -493,6 +529,113 @@ impl ScanEngine {
         }
 
         Ok(())
+    }
+
+    /// Performs a bottom-up directory rollup so parent folders accurately sum all their descendants,
+    /// and flushes the aggregated directories to SQLite in batches.
+    fn rollup_and_flush_directories(
+        db_pool: &DbPool,
+        session_id: &str,
+        dir_map: &mut std::collections::HashMap<String, RawDirItem>,
+        batch_size: usize,
+    ) -> Result<()> {
+        if dir_map.is_empty() {
+            return Ok(());
+        }
+
+        // Sort descending by path length so deepest paths roll up to their parents first
+        let mut dir_paths: Vec<String> = dir_map.keys().cloned().collect();
+        dir_paths.sort_by(|a, b| b.len().cmp(&a.len()));
+
+        for path in dir_paths {
+            if let Some(child) = dir_map.get(&path) {
+                let child_bytes = child.total_size_bytes;
+                let child_files = child.file_count;
+                let parent_opt = child.parent_path.clone();
+
+                if let Some(parent_path) = parent_opt {
+                    if let Some(parent) = dir_map.get_mut(&parent_path) {
+                        parent.total_size_bytes += child_bytes;
+                        parent.file_count += child_files;
+                    }
+                }
+            }
+        }
+
+        // Flush rolled up directories into database in chunks
+        let mut rolled_up: Vec<RawDirItem> = dir_map.drain().map(|(_, v)| v).collect();
+        for chunk in rolled_up.chunks_mut(batch_size) {
+            let mut chunk_vec = chunk.to_vec();
+            let mut empty_files = Vec::new();
+            let mut empty_errors = Vec::new();
+            Self::flush_batches(db_pool, session_id, &mut empty_files, &mut chunk_vec, &mut empty_errors)?;
+        }
+
+        Ok(())
+    }
+
+    /// Automatically detects operating system boundary and virtual storage paths that must not be traversed
+    /// to prevent infinite loops, duplicate scans of APFS firmlinks, or hanging on pseudo device files.
+    fn is_system_internal_exclusion(path: &Path, root_path: &Path) -> bool {
+        let path_str = path.to_string_lossy();
+        let root_str = root_path.to_string_lossy();
+
+        if path_str == root_str {
+            return false;
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            // 1. /System/Volumes contains virtual sub-volumes (Data, VM, Preboot, Update).
+            //    Scanning /System/Volumes/Data when root is / duplicates the entire drive!
+            if path_str.starts_with("/System/Volumes") {
+                return true;
+            }
+            // 2. /Volumes contains other mounted drives, network shares, DMGs, and /Volumes/Macintosh HD (loop back to /)
+            if path_str.starts_with("/Volumes") && !root_str.starts_with("/Volumes") {
+                return true;
+            }
+            // 3. /dev contains special character and FIFO device files
+            if path_str.starts_with("/dev") || path_str.starts_with("/net") || path_str.starts_with("/home") {
+                return true;
+            }
+            // 4. Active virtual memory and core system metadata
+            if path_str.starts_with("/private/var/vm")
+                || path_str.contains("/.Spotlight-V100")
+                || path_str.contains("/.fseventsd")
+                || path_str.contains("/.DocumentRevisions-V100")
+                || path_str.contains("/.PKInstallSandboxManager")
+            {
+                return true;
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let lower = path_str.to_lowercase();
+            if lower.contains("system volume information")
+                || lower.contains("$recycle.bin")
+                || lower.ends_with("pagefile.sys")
+                || lower.ends_with("hiberfil.sys")
+                || lower.ends_with("swapfile.sys")
+                || lower.contains("documents and settings")
+            {
+                return true;
+            }
+        }
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            if path_str.starts_with("/proc")
+                || path_str.starts_with("/sys")
+                || path_str.starts_with("/dev")
+                || path_str.starts_with("/run")
+            {
+                return true;
+            }
+        }
+
+        false
     }
 
     fn is_excluded(path_str: &str, exclusions: &[String]) -> bool {

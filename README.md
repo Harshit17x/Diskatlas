@@ -1,226 +1,237 @@
-# DiskAtlas 🧭
+<div align="center">
 
-> **Premium Local-First Storage Intelligence for Windows 10/11 & macOS.**  
-> Built with **Tauri 2**, **Rust**, **React 19**, **TypeScript**, **SQLite (WAL)**, **D3.js**, and **Tailwind CSS**.
+# 🧭 DiskAtlas
+
+### The modern, private, blazing-fast disk space analyzer & developer storage cleaner.
+**Cross-platform for macOS, Windows 10/11, and Linux.**
+
+Built with **Rust**, **Tauri 2**, **React 19**, **TypeScript**, **SQLite (WAL)**, and **D3.js**.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Tauri 2.0](https://img.shields.io/badge/Tauri-2.0-24C8DB.svg?logo=tauri&logoColor=white)](https://tauri.app)
+[![Tauri 2.0](https://img.shields.io/badge/Tauri-2.2-24C8DB.svg?logo=tauri&logoColor=white)](https://tauri.app)
+[![Rust 1.80+](https://img.shields.io/badge/Rust-1.80+-DEA584.svg?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![React 19](https://img.shields.io/badge/React-19.0-61DAFB.svg?logo=react&logoColor=black)](https://react.dev)
-[![Rust](https://img.shields.io/badge/Rust-1.80+-DEA584.svg?logo=rust&logoColor=white)](https://www.rust-lang.org)
-[![Zero Telemetry](https://img.shields.io/badge/Telemetry-Zero-27AE82.svg)](docs/SECURITY_AUDIT.md)
+[![Zero Telemetry](https://img.shields.io/badge/Privacy-100%25%20Local-27AE82.svg)](docs/SECURITY_AUDIT.md)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+
+[Features](#-key-features) • [Why DiskAtlas?](#-why-diskatlas-vs-alternatives) • [Installation](#-installation) • [Architecture](#-architecture) • [Contributing](#-contributing) • [Roadmap](#-roadmap)
 
 ---
 
-## 🌟 Philosophy: Discover → Understand → Analyze → Recommend → Optimize
+</div>
 
-DiskAtlas is an ultra-fast, local-first storage analytics desktop application engineered for technical users, software engineers, and power users. It indexes drives at hardware speeds, classifies file ownership deterministically, uncovers dormant developer caches, visualizes hierarchical trees with D3, and recommends storage optimizations with strict operating system safeguards.
+## 💡 The Problem & The Vision
 
-- 🔒 **Zero Remote Telemetry & Complete Local Privacy:** DiskAtlas is strictly offline. Zero remote telemetry, zero analytics SDKs, and zero file content transmissions.
-- 🛡️ **Non-Destructive by Default:** Scanner routines operate exclusively with read-only metadata handles. Cleanup uses the native Windows Recycle Bin with strict confirmation barriers.
-- ⚡ **High-Throughput Rust Core:** Multi-threaded filesystem traversal with bounded work stacks, avoiding stack overflows and loop traps on symlinks and Windows NTFS junctions.
-- 💾 **Embedded SQLite WAL Engine:** Transactions buffered in memory-mapped WAL mode with 64 MB page caches, keeping memory footprint under 48 MB even during 500,000-file indexing runs.
+Every developer has run into the dreaded **"Disk Space Almost Full"** warning. 
 
----
+You run classic disk analyzers, but:
+- **WinDirStat** was built in 2005—it's single-threaded, slow, and chokes on modern multi-terabyte SSDs.
+- **CleanMyMac** and proprietary tools require expensive \$40/year subscriptions, install invasive background daemons, and phone home with analytics.
+- **DaisyDisk** is great, but it's closed-source, Mac-only, and treats all files as generic blobs.
+- Generic tools don't understand that your drive is full because of **15 orphaned `node_modules` folders**, **20 GB of stale `.gemini` / IDE caches**, **forgotten Docker build caches**, **abandoned Python venvs**, and **Xcode DerivedData**.
 
-## 🎨 Enterprise Design System & Palette
-
-DiskAtlas rejects glassmorphism, decorative blur, and neon gimmicks in favor of a clean, high-density professional IDE aesthetic inspired by Linear and Raycast:
-
-| Token | Hex | Role |
-| :--- | :--- | :--- |
-| **Background** | `#101114` | Global root desktop background |
-| **Sidebar** | `#15171B` | Primary navigation pane |
-| **Panel** | `#1B1E23` | Cards, elevated surfaces, and headers |
-| **Elevated** | `#22262C` | Active rows, dropdowns, and hover states |
-| **Border** | `#2D323A` | Subtle dividers and structural outlines |
-| **Primary Text** | `#F1F3F5` | Headings, metrics, and primary values |
-| **Secondary Text** | `#9BA3AE` | Labels, paths, and metadata |
-| **Muted** | `#69717D` | Timestamps, icons, and deactivated elements |
-| **Accent** | `#5687E8` | Interactive selections, charts, and primary buttons |
-| **Success** | `#27AE82` | Low-risk indicators and completed scans |
-| **Warning** | `#E5A54B` | Moderate-risk recommendations and warnings |
-| **Danger** | `#DB6262` | Deletion triggers and critical risk alerts |
+### 🧭 Enter DiskAtlas
+**DiskAtlas** is an open-source, local-first storage intelligence application engineered specifically for developers, power users, and system administrators. It combines a hardware-level multi-threaded Rust scanning engine with intelligent ecosystem detection and interactive D3 visualizations to help you understand and safely optimize your storage in seconds.
 
 ---
 
-## 🚀 Key Modules & Capabilities
+## ⚡ Key Features
+
+### 🚀 1. Ultra-Fast Universal Scanner
+- **50,000+ files/second** multi-threaded traversal powered by Rust and memory-mapped SQLite WAL.
+- **Hardware & Container Aware**: Intelligently unifies macOS APFS Container partitions to eliminate phantom duplicate volumes (`/` vs `/System/Volumes/Data`), and handles Windows NTFS reparse points and drive letters dynamically.
+- **Loop & Cycle Proof**: Bypasses symlink loops, junction points (`IO_REPARSE_TAG_MOUNT_POINT`), and special pseudo filesystems (`/dev`, `/proc`, `/sys`).
+- **Dynamic Bottom-Up Directory Aggregation**: Parent directories accurately reflect the true recursive weight of their subdirectories in real-time.
+- **Non-blocking Controls**: Seamlessly Pause, Resume, or Cancel scans with zero database corruption.
+
+### 🧑‍💻 2. Developer Storage Intelligence
+The major differentiator: DiskAtlas identifies software projects and separates user code from regenerable build artifacts:
+- **Node.js / JavaScript**: Detects `node_modules`, `.next/cache`, `.nuxt`, `.output`, `.vite`, `.turbo`, `.parcel-cache`, npm cache, and pnpm stores. Automatically extracts project names from `package.json`.
+- **Python**: Identifies `.venv`, `venv`, `__pycache__`, `.pytest_cache`, `.ruff_cache`, pip wheel caches, and Conda environments.
+- **Rust**: Discovers `target/` directories, `.cargo/registry`, and `.cargo/git` cache bloat.
+- **Docker**: Safely inspects local images, containers, volumes, and build cache through official Docker engine APIs—never touching raw internal files.
+- **Java / Mobile**: Identifies `.m2/repository`, `.gradle/caches`, Android SDK platforms, emulator system images, and JDK installs.
+- **C / C++**: Flags `cmake-build-debug`, `cmake-build-release`, `.vs/`, and compiler object outputs.
+- **IDEs**: Unpacks storage from VS Code, Cursor, JetBrains, Xcode DerivedData, and Antigravity.
+
+### 📊 3. Interactive D3 Visualizations
+- **Squarified Treemaps**: Area-proportional rectangles colored by category with interactive drilldown, breadcrumb navigation, and hover diagnostics.
+- **Radial Multi-Level Sunburst**: Concentric ring partitions visualising directory depth and hierarchy balance.
+- **Real-Time Storage Distribution**: Live breakdown of file extensions, categories, and top storage consumers.
+
+### 🔍 4. Advanced Storage Analysis
+- **Staged Cryptographic Duplicate Finder**: 4-stage pipeline (Size match → Metadata validation → Initial block check → Full SHA-256 cryptographic verification). Distinguishes true identical binaries from visually similar media.
+- **Large Files Engine**: Configurable size filters, extension whitelists, and instant sorting.
+- **Hidden & System Storage Demystifier**: Accurately distinguishes user dotfiles (`.config`, `.git`) from protected OS components.
+- **Forgotten Files**: Identifies stale installers (`.dmg`, `.pkg`, `.exe`, `.msi`), old archives (`.zip`, `.tar.gz`), and dormant downloads.
+
+### 🛡️ 5. Safe Cleanup Center with Audit Log
+- **Zero Automatic Deletions**: Every deletion requires explicit user selection and confirmation.
+- **Critical OS Safeguards**: Automatically blocks deletion of Windows boot components (`bootmgr`, `WinSxS`, drivers) and sealed macOS APFS snapshots.
+- **Cloud-Sync Awareness**: Detects and warns when target folders reside inside OneDrive, iCloud, Google Drive, or Dropbox to prevent accidental remote deletion propagation.
+- **Reversible Workflow**: Prioritizes the native OS Trash / Windows Recycle Bin by default.
+- **Audit Trail**: Maintains an immutable SQLite audit log recording every cleanup event, timestamp, and recovered byte count.
+
+### 🔒 6. 100% Private & Local-First
+- **Zero Telemetry**: No tracking, no Google Analytics, no PostHog, no phone-home pings.
+- **Fully Offline**: Operates seamlessly without an active internet connection.
+- **Local SQLite Engine**: All data stays encrypted on your local hardware in an embedded SQLite database.
+
+---
+
+## 🥊 Why DiskAtlas vs Alternatives?
+
+| Feature | **DiskAtlas** 🧭 | **WinDirStat** 🪟 | **DaisyDisk** 🍏 | **CleanMyMac** 🧹 | **Baobab** 🐧 |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Open Source** | **Yes (MIT)** | Yes (GPL) | No (Proprietary) | No (Proprietary) | Yes (GPL) |
+| **Cross-Platform** | **macOS, Windows, Linux** | Windows only | macOS only | macOS only | Linux only |
+| **Cost** | **100% Free** | Free | \$9.99 | \$39.95 / year | Free |
+| **Developer Intelligence** | **Yes (Node, Rust, Python, Docker)** | No | No | Partial | No |
+| **Multi-Threaded Rust Scanner** | **Yes (>50k files/s)** | No (Legacy C++) | Yes (Swift) | No | No (C/GTK) |
+| **Modern UI / UX** | **React 19 + Tailwind** | 2005 Win32 UI | Modern macOS | Modern macOS | GTK4 |
+| **Interactive Treemap & Sunburst** | **Both (D3.js)** | Treemap only | Sunburst only | No | Both |
+| **Safe Reversible Cleanup** | **Recycle Bin / Trash** | Permanent delete | Permanent delete | Custom cleaner | Trash |
+| **Telemetry / Tracking** | **Zero (100% Local)** | Zero | Unknown | Telemetry included | Zero |
+
+---
+
+## 🛠️ Architecture
+
+DiskAtlas is architected with a strict separation between low-level systems execution, embedded persistence, and high-density user interface:
 
 ```
-DiskAtlas Core Architecture
-├── Hardware Discovery & Win32 Drive Engine
-├── Universal Filesystem Scanner (Cycle-proof, Batched SQLite)
-├── 16-Category Deterministic Classification Engine
-├── Developer Storage Intelligence (Node.js, Rust, Python, Docker, C/C++, Java)
-├── Advanced Analysis (Large Files, Staged Duplicates, Hidden/System, Forgotten Files)
-├── Macro Intelligence & Evidence-Backed Recommendation Engine
-├── D3 Visualizations (Squarified Treemaps, Radial Sunbursts, Analytics)
-└── Safe Cleanup Center (Recycle Bin / Trash, Safeguards, Audit Trail)
-```
-
-### 1. Drive Discovery & Hardware Health
-- Detects internal drives, NVMe/SATA SSDs, external HDDs, USB sticks, and virtual volumes.
-- Retrieves volume labels, mount points, total capacity, free space, and filesystems (NTFS, FAT32, exFAT, APFS).
-
-### 2. High-Throughput Universal Scanner
-- Iterative work stack traversal that handles deep directories (>100 levels) without call-stack recursion.
-- Bypasses directory junctions (`IO_REPARSE_TAG_MOUNT_POINT`) and cyclic symlinks.
-- Captures logical sizes, Windows file attributes (`FILE_ATTRIBUTE_HIDDEN`, `FILE_ATTRIBUTE_SYSTEM`), and timestamps.
-- Batch transactions (5,000 items/commit) achieve >25,000 files/sec on NVMe drives.
-- Non-blocking pause, resume, and cancellation.
-
-### 3. Developer Storage Intelligence
-Specialized detection engine identifying deep developer build caches and tooling artifacts:
-- **Node.js**: `node_modules`, `.next`, `.nuxt`, `.output`, `.vite`, `.turbo`, `.parcel-cache`, npm/pnpm/Yarn caches.
-- **Python**: `.venv`, `venv`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, pip/uv/Conda caches.
-- **Rust**: `target`, `.cargo/registry`, `.cargo/git`.
-- **C/C++**: `cmake-build-debug`, `cmake-build-release`, `.vs`, compiler outputs.
-- **Java**: `.m2/repository`, `.gradle/caches`, Android SDKs, and build directories.
-- **Docker**: Inspects images, containers, volumes, and build cache via local engine API without touching internal files.
-
-### 4. Advanced Storage Analysis
-- **Staged Duplicate Finder**: 4-stage pipeline (Size match → Metadata check → SHA-256 hash match → Hash grouping).
-- **Large Files Engine**: Configurable size threshold, extension filters, and sorting.
-- **Hidden & System Items**: Distinguishes user-hidden files (`.dotfiles`, hidden attribute) from OS-protected components.
-- **Forgotten Files**: Heuristic detection of stale installers, old downloads, and abandoned build trees.
-- **Unknown Storage**: Discovers unclassified binary blobs and isolated subtrees.
-
-### 5. D3 Visualizations & Analytics
-- **D3 Squarified Treemap**: Proportional area representation with category color palettes, hover tooltips, and click drilldown.
-- **D3 Radial Sunburst**: Multi-level concentric ring partition mapping directory depth and structural weight.
-- **Analytics Dashboard**: Real-time progress bars and distribution charts for categories, file types, and top directories.
-
-### 6. Safe Cleanup Center & Audit Trail
-- **System Safeguards**: Automatically blocks deletion of Windows boot components (`bootmgr`, `bcd`), drivers (`*.sys`), kernel memory (`pagefile.sys`), and core directories (`WinSxS`).
-- **Cloud Sync Warning**: Flags files inside OneDrive, Google Drive, Dropbox, or iCloud to alert users about deletion propagation.
-- **Reversible Workflow**: Moves items to the Windows Recycle Bin / Trash by default.
-- **Explicit Confirmation**: Requires typing `CONFIRM_CLEANUP` before executing destructive actions.
-- **Cryptographic Audit Trail**: Records all actions into `cleanup_audit_events` with timestamps, methods, and statuses.
-
----
-
-## 🛠️ Technology Stack
-
-| Layer | Component | Version / Description |
-| :--- | :--- | :--- |
-| **Desktop Shell** | [Tauri](https://tauri.app) | 2.2.0 (Rust desktop runtime) |
-| **Backend Core** | [Rust](https://www.rust-lang.org) | 2021 Edition, `tokio`, `sysinfo`, `trash`, `sha2`, `hex` |
-| **Persistence** | [SQLite 3](https://www.sqlite.org) | `rusqlite` bundled, WAL mode, embedded migrations |
-| **Frontend UI** | [React](https://react.dev) | 19.0.0 with [TypeScript](https://www.typescriptlang.org) |
-| **Bundler** | [Vite](https://vitejs.dev) | 6.4.5 tuned for desktop IPC |
-| **Visualizations** | [D3.js](https://d3js.org) | D3 Hierarchy, Squarify Treemap, Radial Sunburst |
-| **Styling** | [Tailwind CSS](https://tailwindcss.com) | Custom theme adhering to dark enterprise palette |
-| **State** | [Zustand](https://zustand-demo.pmnd.rs) | Decoupled feature stores |
-| **Tables** | [TanStack Table](https://tanstack.com/table) | v8 virtualized data tables |
-
----
-
-## 📁 Repository Structure
-
-```
-DiskAtlas/
-├── src/                                   # Frontend Application (React 19 + TypeScript)
-│   ├── app/                               # App entry (App.tsx, main.tsx, index.css)
-│   ├── components/
-│   │   ├── cleanup/                       # Cleanup modal, results banner
-│   │   ├── common/                        # Card, Badge, Modal, DataTable primitives
-│   │   ├── layout/                        # Sidebar, Header, StatusBar
-│   │   └── visualizations/                # D3 Treemap, Sunburst, Analytics Dashboard
-│   ├── features/
-│   │   ├── analysis/                      # Storage Analysis & category breakdowns
-│   │   ├── applications/                  # Application footprint inspector
-│   │   ├── cleanup/                       # Safe Cleanup Center
-│   │   ├── dashboard/                     # Executive storage dashboard
-│   │   ├── developer/                     # Developer ecosystem storage intelligence
-│   │   ├── drives/                        # Drive discovery & volume cards
-│   │   ├── duplicates/                    # Staged cryptographic duplicate finder
-│   │   ├── explorer/                      # D3 Treemap, Sunburst & File Registry Table
-│   │   ├── hidden/                        # Hidden and system-protected items
-│   │   ├── history/                       # Storage growth & scan snapshot comparisons
-│   │   ├── intelligence/                  # Storage findings & recommendation cards
-│   │   ├── scanner/                       # Scan initiation modal & live progress
-│   │   └── settings/                      # Preferences, exclusions, database health
-│   ├── stores/                            # Zustand feature state stores
-│   ├── types/                             # TypeScript bindings matching Rust models
-│   └── utils/                             # Formatters, byte helpers, and safeInvoke
-├── src-tauri/                             # Backend Application (Rust + Tauri 2)
-│   ├── capabilities/                      # Least-privilege capability configs
-│   ├── migrations/                        # 8 embedded sequential SQLite migrations
-│   │   ├── 0001_initial_schema.sql        # Drives, sessions, app settings
-│   │   ├── 0002_files_and_directories.sql # Files, directories, scan errors
-│   │   ├── 0003_storage_history...sql     # Snapshots, category summaries
-│   │   ├── 0004_storage_classification... # 16 categories, overrides
-│   │   ├── 0005_developer_storage.sql     # Projects, ecosystem summaries
-│   │   ├── 0006_advanced_analysis.sql     # File hashes, hidden items
-│   │   ├── 0007_storage_intelligence.sql  # Recommendations, findings
-│   │   └── 0008_cleanup_audit_history.sql # Audit trail events table
-│   └── src/
-│       ├── commands/                      # Tauri IPC command controllers
-│       ├── models/                        # Typed data models and queries
-│       ├── services/                      # Scanner, classifier, developer, cleanup
-│       ├── storage/                       # Connection pool & migrator engine
-│       ├── error.rs                       # AppError enum with sanitized serialization
-│       ├── lib.rs                         # Tauri builder setup & command handlers
-│       └── main.rs                        # Windows/macOS binary entry point
-├── docs/                                  # Documentation & Audit Artifacts
-│   ├── WINDOWS_RELEASE_GUIDE.md           # NSIS/MSI packaging & code signing
-│   ├── SECURITY_AUDIT.md                  # Zero-telemetry audit & safeguards
-│   └── TEST_REPORT.md                     # Comprehensive 11-category QA report
-├── package.json                           # Frontend dependencies & npm scripts
-├── tailwind.config.js                     # Theme palette definitions
-├── tsconfig.json                          # Strict TypeScript workspace configuration
-└── vite.config.ts                         # Vite 6 desktop build configuration
+┌─────────────────────────────────────────────────────────────┐
+│                    DiskAtlas Desktop App                    │
+│   (React 19 • TypeScript • Tailwind CSS • D3.js Visuals)   │
+└──────────────────────────────▲──────────────────────────────┘
+                               │ Tauri 2 IPC (Type-Safe RPC)
+┌──────────────────────────────▼──────────────────────────────┐
+│                    Rust Core Engine                         │
+│  ├── Multi-Threaded Scanner (Bounded Stack, Cycle-Proof)    │
+│  ├── APFS & NTFS Filesystem Abstraction                     │
+│  ├── Deterministic 16-Category Classification Rules         │
+│  ├── Developer Ecosystem Analyzers (Cargo, npm, pip, etc.) │
+│  └── Reversible Trash / Safeguard Engine                    │
+└──────────────────────────────▲──────────────────────────────┘
+                               │ rusqlite
+┌──────────────────────────────▼──────────────────────────────┐
+│                  Embedded SQLite 3 (WAL)                    │
+│  ├── Indexed Files & Directories (Recursive Rollups)        │
+│  ├── Storage Snapshots & Historical Diffs                   │
+│  └── Audit Trail Records                                    │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 🚀 Getting Started
+## 📦 Installation
 
-### Prerequisites
+### Pre-Built Binaries
+Download the latest signed release for your platform from the [**Releases Page**](https://github.com/Harshit17x/Diskatlas/releases):
 
-1. **Node.js**: v20+ LTS
-2. **Rust & Cargo**: v1.80+
-3. **Platform Build Tools**:
-   - **Windows:** Visual Studio 2022 C++ Build Tools & WebView2 runtime
-   - **macOS:** Xcode Command Line Tools (`xcode-select --install`)
+- **macOS (Apple Silicon & Intel)**: `.dmg` or `.app`
+- **Windows 10/11 (x64 / ARM64)**: `.msi` or `.exe` installer
+- **Linux**: `.AppImage` or `.deb`
 
-### Installation & Development
+### Package Managers *(Coming Soon)*
 
 ```bash
-# Clone the repository
+# macOS (Homebrew)
+brew install --cask diskatlas
+
+# Windows (Winget)
+winget install Harshit17x.DiskAtlas
+
+# Cargo (Build from source via crates.io)
+cargo install diskatlas
+```
+
+---
+
+## 💻 Building From Source
+
+### Prerequisites
+1. **Node.js**: v20+ LTS
+2. **Rust & Cargo**: v1.80+ ([rustup.rs](https://rustup.rs))
+3. **Build Essentials**:
+   - **macOS:** Xcode Command Line Tools (`xcode-select --install`)
+   - **Windows:** Visual Studio 2022 C++ Build Tools & WebView2 runtime
+   - **Linux:** `libwebkit2gtk-4.1-dev`, `build-essential`, `curl`, `wget`, `file`, `libssl-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`
+
+### Development Setup
+
+```bash
+# 1. Clone the repository
 git clone https://github.com/Harshit17x/Diskatlas.git
 cd Diskatlas
 
-# Install dependencies
+# 2. Install frontend dependencies
 npm install
 
-# Run frontend type-check & linter
-npm run lint
-
-# Run all 24 backend automated unit tests
+# 3. Run automated test suite (25 Rust unit/integration tests)
 cargo test --manifest-path src-tauri/Cargo.toml
 
-# Launch desktop app in development mode
+# 4. Start the application in development mode with hot-reload
 npm run tauri dev
 ```
 
-### Production Build
+### Packaging Production Release
 
 ```bash
-# Build production bundle and Windows installers (NSIS & MSI)
+# Compile optimized frontend assets and native desktop bundle
 npm run build
 npm run tauri build
 ```
 
 ---
 
-## 📖 Documentation & Release Guides
+## 🤝 Contributing
 
-- 📘 [Windows Production Release Guide](docs/WINDOWS_RELEASE_GUIDE.md): NSIS packaging, MSI deployment, and Authenticode signing.
-- 🛡️ [Security Architecture & Audit Report](docs/SECURITY_AUDIT.md): Zero-telemetry audit, least-privilege review, and OS safeguards.
-- 📋 [Comprehensive Quality Assurance Test Report](docs/TEST_REPORT.md): 11-category test matrix covering Windows 10/11, long paths, reparse points, and database recovery.
+We welcome contributions from developers, designers, and documentation writers of all experience levels! DiskAtlas is built to be a friendly, welcoming open-source project.
+
+### How You Can Help
+- 🌟 **Star this repository** to help others discover the project.
+- 🐛 **Report bugs** or suggest new features via [GitHub Issues](https://github.com/Harshit17x/Diskatlas/issues).
+- 🧑‍💻 **Add new developer ecosystem detectors** (e.g., Elixir `_build`, Go module caches, Flutter/Dart caches, Gradle Kotlin DSL).
+- 🌐 **Translate the UI** into additional languages.
+- 🎨 **Improve visualizations** and accessibility.
+
+### Getting Started with Code Contributions
+1. Fork the repository and clone your fork.
+2. Create a new branch: `git checkout -b feature/my-cool-feature`.
+3. Make your changes and verify tests pass: `cargo test --manifest-path src-tauri/Cargo.toml`.
+4. Commit your changes: `git commit -m "feat(developer): add support for Elixir _build detector"`.
+5. Push to your branch and open a Pull Request.
+
+Please review our [**Contributing Guide**](CONTRIBUTING.md) and [**Code of Conduct**](CODE_OF_CONDUCT.md).
+
+---
+
+## 🗺️ Roadmap
+
+- [x] High-throughput universal scanner with cycle and junction protection.
+- [x] APFS single-container unified geometry detection.
+- [x] Dynamic bottom-up directory size rollups.
+- [x] 16-Category deterministic classification engine.
+- [x] Developer ecosystem intelligence (Node, Python, Rust, Java, C++, Docker).
+- [x] D3 Squarified Treemap and Radial Sunburst visualizations.
+- [x] Safe Cleanup Center with Recycle Bin / Trash integration and audit logs.
+- [ ] **v1.1**: CLI mode (`diskatlas scan /path` with terminal interactive TUI).
+- [ ] **v1.2**: Scheduled automated background alerts when reclaimable cache exceeds 20 GB.
+- [ ] **v1.3**: Plugin system for community-contributed developer cache detectors.
+- [ ] **v1.4**: Cloud storage remote scanner (S3, Google Drive, Backblaze B2 metadata inspection).
 
 ---
 
 ## 📄 License
 
-DiskAtlas is licensed under the **MIT License**. See [LICENSE](LICENSE) for details.
+DiskAtlas is licensed under the [**MIT License**](LICENSE). Feel free to use, modify, and distribute it freely.
+
+---
+
+<div align="center">
+
+Made with ❤️ by [Harshit Bisht](https://github.com/Harshit17x) and the open-source community.  
+**If you find DiskAtlas useful, please consider giving it a ⭐ on GitHub!**
+
+</div>

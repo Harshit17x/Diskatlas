@@ -41,6 +41,26 @@ impl DriveDetector {
     /// Synchronizes detected drives into the SQLite `drives` table.
     pub fn sync_to_db(conn: &mut Connection, drives: &[DriveInfo]) -> Result<()> {
         let tx = conn.transaction()?;
+
+        // Clean out any stale/inactive drives (e.g. duplicate APFS sub-volumes like /System/Volumes/Data)
+        let active_ids: Vec<&str> = drives.iter().map(|d| d.id.as_str()).collect();
+        {
+            let mut check_stmt = tx.prepare("SELECT id FROM drives")?;
+            let existing_ids: Vec<String> = check_stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            for id in existing_ids {
+                if !active_ids.contains(&id.as_str()) {
+                    let _ = tx.execute(
+                        "DELETE FROM drives WHERE id = ?1 AND id NOT IN (SELECT drive_id FROM scan_sessions)",
+                        [&id],
+                    );
+                }
+            }
+        }
+
         for drive in drives {
             let total = drive.total_bytes.unwrap_or(0);
             let available = drive.available_bytes.unwrap_or(0);
@@ -335,6 +355,52 @@ mod unix_impl {
     use super::*;
     use sysinfo::Disks;
 
+    #[cfg(target_os = "macos")]
+    fn get_macos_apfs_container_stats() -> Option<(u64, u64)> {
+        use std::process::Command;
+        let output = Command::new("diskutil")
+            .args(&["info", "/"])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut total_bytes = None;
+        let mut free_bytes = None;
+
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("Container Total Space:") {
+                if let Some(open) = trimmed.find('(') {
+                    if let Some(close) = trimmed[open..].find(" Bytes)") {
+                        let num_str = &trimmed[open + 1..open + close];
+                        if let Ok(b) = num_str.parse::<u64>() {
+                            total_bytes = Some(b);
+                        }
+                    }
+                }
+            } else if trimmed.starts_with("Container Free Space:") {
+                if let Some(open) = trimmed.find('(') {
+                    if let Some(close) = trimmed[open..].find(" Bytes)") {
+                        let num_str = &trimmed[open + 1..open + close];
+                        if let Ok(b) = num_str.parse::<u64>() {
+                            free_bytes = Some(b);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let (Some(t), Some(f)) = (total_bytes, free_bytes) {
+            Some((t, f))
+        } else {
+            None
+        }
+    }
+
     pub fn detect_unix_drives() -> Vec<DriveInfo> {
         let disks = Disks::new_with_refreshed_list();
         let mut results = Vec::new();
@@ -343,11 +409,22 @@ mod unix_impl {
             let mount_path = disk.mount_point().to_string_lossy().to_string();
             let disk_name = disk.name().to_string_lossy().to_string();
 
+            // On macOS, skip synthetic/internal APFS firmlinks, pseudo-filesystems, and sub-volumes:
+            // e.g. /System/Volumes/Data, /System/Volumes/VM, /System/Volumes/Preboot, /System/Volumes/Update, /dev, /private/var/vm
+            if mount_path.starts_with("/System/Volumes")
+                || mount_path.starts_with("/private/var/vm")
+                || mount_path == "/dev"
+                || mount_path == "/Volumes/Recovery"
+                || mount_path.contains("auto_home")
+            {
+                continue;
+            }
+
             let is_system = mount_path == "/";
-            let label = if !disk_name.trim().is_empty() {
+            let label = if is_system {
+                "Macintosh HD".to_string()
+            } else if !disk_name.trim().is_empty() {
                 disk_name.clone()
-            } else if is_system {
-                "Macintosh HD / Root".to_string()
             } else {
                 mount_path.clone()
             };
@@ -359,8 +436,19 @@ mod unix_impl {
                 Some(fs_raw.clone())
             };
 
-            let total_raw = disk.total_space();
-            let avail_raw = disk.available_space();
+            #[cfg(target_os = "macos")]
+            let (total_raw, avail_raw) = if is_system {
+                if let Some((ct, cf)) = get_macos_apfs_container_stats() {
+                    (ct, cf)
+                } else {
+                    (disk.total_space(), disk.available_space())
+                }
+            } else {
+                (disk.total_space(), disk.available_space())
+            };
+
+            #[cfg(not(target_os = "macos"))]
+            let (total_raw, avail_raw) = (disk.total_space(), disk.available_space());
 
             // Clearly distinguish unavailable capacity from 0
             let (total_bytes, available_bytes, used_bytes, used_percent) = if total_raw > 0 {
@@ -390,7 +478,9 @@ mod unix_impl {
                 DriveType::InternalHdd
             };
 
-            let id = if !disk_name.is_empty() {
+            let id = if is_system {
+                "Macintosh HD".to_string()
+            } else if !disk_name.is_empty() {
                 disk_name
             } else {
                 mount_path.clone()

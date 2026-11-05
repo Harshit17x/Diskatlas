@@ -99,7 +99,7 @@ impl ScanManager {
             drive_id,
             root_path: path,
             exclusions: exclusions.unwrap_or_default(),
-            batch_size: 500,
+            batch_size: 2500,
         };
 
         // Spawn background async task
