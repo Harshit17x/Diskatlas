@@ -100,14 +100,8 @@ pub fn is_system_critical_path(path: &Path) -> (bool, Option<&'static str>) {
     ];
     let normalized_unix = path_str.replace('\\', "/").to_lowercase();
     for ucr in unix_critical_roots {
-        if normalized_unix == ucr || normalized_unix == format!("{}/", ucr) {
+        if normalized_unix == ucr || normalized_unix == format!("{}/", ucr) || normalized_unix.starts_with(&format!("{}/", ucr)) {
             return (true, Some("Protected Unix / macOS core operating system path"));
-        }
-        if normalized_unix.starts_with(&format!("{}/", ucr)) {
-            // Check if within critical kernel / drivers
-            if ucr == "/system" || ucr == "/system/library" || ucr == "/library/extensions" {
-                return (true, Some("Protected Unix / macOS core operating system path"));
-            }
         }
     }
 
@@ -198,6 +192,9 @@ mod tests {
         assert!(is_system_critical_path(Path::new("/System")).0);
         assert!(is_system_critical_path(Path::new("/System/Library/Extensions/AppleKext.kext")).0);
         assert!(is_system_critical_path(Path::new("/usr/bin")).0);
+        assert!(is_system_critical_path(Path::new("/usr/bin/bash")).0);
+        assert!(is_system_critical_path(Path::new("/bin/sh")).0);
+        assert!(is_system_critical_path(Path::new("/etc/hosts")).0);
         assert!(is_system_critical_path(Path::new("/")).0);
 
         // Safe user paths (should NOT be marked critical)

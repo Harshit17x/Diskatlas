@@ -1,6 +1,6 @@
 pub mod safeguards;
 
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use std::path::Path;
 use uuid::Uuid;
 use tracing::{info, warn};
@@ -320,8 +320,17 @@ impl CleanupService {
                         successful_count += 1;
                         bytes_reclaimed += size_bytes;
 
-                        // Delete from active recommendations table
+                        // Delete from active recommendations table and synchronise files/directories index
                         let _ = conn.execute("DELETE FROM storage_recommendations WHERE id = ?1", [item_id]);
+                        let path_child_pattern = format!("{}/%", path.trim_end_matches('/'));
+                        let _ = conn.execute(
+                            "DELETE FROM files WHERE session_id = ?1 AND (path = ?2 OR path LIKE ?3)",
+                            params![&request.session_id, &path, &path_child_pattern],
+                        );
+                        let _ = conn.execute(
+                            "DELETE FROM directories WHERE session_id = ?1 AND (path = ?2 OR path LIKE ?3)",
+                            params![&request.session_id, &path, &path_child_pattern],
+                        );
                     }
                     Err(e) => {
                         let err_str = e.to_string();
@@ -402,6 +411,15 @@ impl CleanupService {
                         bytes_reclaimed += size_bytes;
 
                         let _ = conn.execute("DELETE FROM storage_recommendations WHERE id = ?1", [item_id]);
+                        let path_child_pattern = format!("{}/%", path.trim_end_matches('/'));
+                        let _ = conn.execute(
+                            "DELETE FROM files WHERE session_id = ?1 AND (path = ?2 OR path LIKE ?3)",
+                            params![&request.session_id, &path, &path_child_pattern],
+                        );
+                        let _ = conn.execute(
+                            "DELETE FROM directories WHERE session_id = ?1 AND (path = ?2 OR path LIKE ?3)",
+                            params![&request.session_id, &path, &path_child_pattern],
+                        );
                     }
                     Err(e) => {
                         let err_str = e.to_string();

@@ -411,17 +411,39 @@ impl DeveloperService {
         let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| ".".to_string());
         let home_path = PathBuf::from(&home);
 
+        #[cfg(target_os = "windows")]
+        let (pnpm_store, android_sdk) = (
+            std::env::var("LOCALAPPDATA")
+                .map(|l| PathBuf::from(l).join("pnpm/store"))
+                .unwrap_or_else(|_| home_path.join("AppData/Local/pnpm/store")),
+            std::env::var("LOCALAPPDATA")
+                .map(|l| PathBuf::from(l).join("Android/Sdk"))
+                .unwrap_or_else(|_| home_path.join("AppData/Local/Android/Sdk")),
+        );
+
+        #[cfg(target_os = "macos")]
+        let (pnpm_store, android_sdk) = (
+            home_path.join("Library/pnpm/store"),
+            home_path.join("Library/Android/sdk"),
+        );
+
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+        let (pnpm_store, android_sdk) = (
+            home_path.join(".local/share/pnpm/store"),
+            home_path.join("Android/Sdk"),
+        );
+
         let targets = vec![
             ("Cargo Registry", home_path.join(".cargo/registry")),
             ("Cargo Git Caches", home_path.join(".cargo/git")),
             ("npm Global Cache", home_path.join(".npm")),
-            ("pnpm Global Store", home_path.join("Library/pnpm/store")),
+            ("pnpm Global Store", pnpm_store),
             ("Yarn Global Cache", home_path.join(".cache/yarn")),
             ("pip Global Cache", home_path.join(".cache/pip")),
             ("uv Global Cache", home_path.join(".cache/uv")),
             ("Maven .m2 Repository", home_path.join(".m2/repository")),
             ("Gradle Caches", home_path.join(".gradle/caches")),
-            ("Android SDK & Emulators", home_path.join("Library/Android/sdk")),
+            ("Android SDK & Emulators", android_sdk),
             ("Xcode DerivedData", home_path.join("Library/Developer/Xcode/DerivedData")),
         ];
 
@@ -450,13 +472,24 @@ impl DeveloperService {
     fn calculate_dir_size(path: &Path) -> (u64, u64) {
         let mut total_size: u64 = 0;
         let mut file_count: u64 = 0;
+        let mut stack = vec![path.to_path_buf()];
+        let mut visited: usize = 0;
 
-        if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries.flatten() {
-                if let Ok(meta) = entry.metadata() {
-                    if meta.is_file() {
-                        total_size += meta.len();
-                        file_count += 1;
+        while let Some(current) = stack.pop() {
+            visited += 1;
+            if visited > 50_000 {
+                // Safeguard against unbounded traversal
+                break;
+            }
+            if let Ok(entries) = std::fs::read_dir(&current) {
+                for entry in entries.flatten() {
+                    if let Ok(meta) = entry.metadata() {
+                        if meta.is_file() {
+                            total_size += meta.len();
+                            file_count += 1;
+                        } else if meta.is_dir() && !meta.file_type().is_symlink() {
+                            stack.push(entry.path());
+                        }
                     }
                 }
             }

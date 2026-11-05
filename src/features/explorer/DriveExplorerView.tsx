@@ -56,6 +56,7 @@ export const DriveExplorerView: React.FC = () => {
   const {
     tree,
     isLoadingTree,
+    currentRootPath,
     breadcrumbs,
     maxDepth,
     fetchTree,
@@ -67,7 +68,13 @@ export const DriveExplorerView: React.FC = () => {
 
   useEffect(() => {
     fetchTree(activeSessionId || undefined, currentPath);
-  }, [fetchTree, activeSessionId, currentPath]);
+  }, [fetchTree, activeSessionId]);
+
+  useEffect(() => {
+    if (currentRootPath) {
+      setCurrentPath(currentRootPath);
+    }
+  }, [currentRootPath]);
 
   const getFileCategoryIcon = (ext: string | null) => {
     if (!ext) return <File className="w-3.5 h-3.5 text-secondary flex-shrink-0" />;

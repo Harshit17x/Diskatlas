@@ -1,44 +1,76 @@
-import React from 'react';
+import React, { useEffect, useMemo } from 'react';
 import { Card } from '../../components/common/Card';
 import { Button } from '../../components/common/Button';
 import { DataTable } from '../../components/common/DataTable';
 import type { ColumnDef } from '@tanstack/react-table';
+import type { AppStatItem } from '../../types/bindings';
+import { useAnalysisStore } from '../../stores/analysisStore';
+import { useHistoryStore } from '../../stores/historyStore';
+import { formatBytes, formatNumber } from '../../utils/formatters';
 import { Play, RotateCw, AppWindow } from 'lucide-react';
 
-interface ApplicationRow {
-  name: string;
-  installPath: string;
-  vendor: string;
-  version: string;
-  footprintBytes: number;
-}
-
 export const ApplicationsView: React.FC = () => {
-  const columns: ColumnDef<ApplicationRow>[] = [
+  const { activeProfile, isLoading, fetchAnalysis, runClassification } = useAnalysisStore();
+  const { sessionsPage, fetchSessions } = useHistoryStore();
+
+  useEffect(() => {
+    fetchSessions(1, 20);
+    fetchAnalysis();
+  }, [fetchSessions, fetchAnalysis]);
+
+  // Aggregate detected software suites and packages across classification categories
+  const apps: AppStatItem[] = useMemo(() => {
+    if (!activeProfile?.categories) return [];
+    const map = new Map<string, AppStatItem>();
+    for (const cat of activeProfile.categories) {
+      for (const app of cat.topApps) {
+        const existing = map.get(app.appName);
+        if (existing) {
+          existing.fileCount += app.fileCount;
+          existing.totalBytes += app.totalBytes;
+        } else {
+          map.set(app.appName, { ...app });
+        }
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => b.totalBytes - a.totalBytes);
+  }, [activeProfile]);
+
+  const totalAppBytes = apps.reduce((acc: number, a: AppStatItem) => acc + a.totalBytes, 0);
+  const totalFiles = apps.reduce((acc: number, a: AppStatItem) => acc + a.fileCount, 0);
+
+  const handleAnalyze = () => {
+    if (activeProfile?.sessionId) {
+      runClassification(activeProfile.sessionId);
+    } else if (sessionsPage?.items[0]?.id) {
+      runClassification(sessionsPage.items[0].id);
+    }
+  };
+
+  const columns: ColumnDef<AppStatItem>[] = [
     {
-      accessorKey: 'name',
-      header: 'Application',
+      accessorKey: 'appName',
+      header: 'Application / Suite',
       cell: ({ row }) => (
         <div className="flex items-center gap-2">
           <AppWindow className="w-4 h-4 text-accent flex-shrink-0" />
-          <span className="font-semibold text-primary">{row.original.name}</span>
+          <span className="font-semibold text-primary">{row.original.appName}</span>
         </div>
       ),
     },
     {
-      accessorKey: 'installPath',
-      header: 'Install Location',
-      cell: ({ getValue }) => <span className="text-secondary font-mono text-xs">{String(getValue())}</span>,
+      accessorKey: 'fileCount',
+      header: 'Indexed Components',
+      cell: ({ getValue }) => (
+        <span className="text-secondary font-mono text-xs">{formatNumber(Number(getValue()))} files</span>
+      ),
     },
     {
-      accessorKey: 'vendor',
-      header: 'Vendor / Source',
-      cell: ({ getValue }) => <span className="text-muted">{String(getValue())}</span>,
-    },
-    {
-      accessorKey: 'footprintBytes',
+      accessorKey: 'totalBytes',
       header: 'Storage Footprint',
-      cell: () => <span className="text-muted font-mono">—</span>,
+      cell: ({ getValue }) => (
+        <span className="text-accent font-mono font-semibold text-xs">{formatBytes(Number(getValue()))}</span>
+      ),
     },
   ];
 
@@ -49,36 +81,48 @@ export const ApplicationsView: React.FC = () => {
         <div>
           <h1 className="text-base font-semibold text-primary">Applications Footprint</h1>
           <p className="text-xs text-secondary mt-0.5">
-            Identify storage consumed by installed software, helper services, and AppData directories
+            Identify storage consumed by installed software, application caches, frameworks, and support libraries
           </p>
         </div>
 
         <div className="flex items-center gap-2">
-          <Button variant="primary" size="sm" icon={<Play className="w-3.5 h-3.5" />}>
-            Analyze Applications
+          <Button
+            variant="primary"
+            size="sm"
+            icon={<Play className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />}
+            onClick={handleAnalyze}
+            disabled={isLoading}
+          >
+            {isLoading ? 'Classifying...' : 'Analyze Applications'}
           </Button>
-          <Button variant="secondary" size="sm" icon={<RotateCw className="w-3.5 h-3.5" />}>
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={<RotateCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />}
+            onClick={() => fetchAnalysis(activeProfile?.sessionId)}
+            disabled={isLoading}
+          >
             Refresh List
           </Button>
         </div>
       </div>
 
-      {/* Info Card */}
+      {/* Info Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <Card padding="md">
           <span className="text-[11px] text-muted uppercase font-semibold">Audited Apps</span>
-          <div className="text-xl font-bold font-mono text-primary mt-1">0</div>
-          <span className="text-[11px] text-muted">Ready for enumeration</span>
+          <div className="text-xl font-bold font-mono text-primary mt-1">{apps.length}</div>
+          <span className="text-[11px] text-muted">Classified software suites</span>
         </Card>
         <Card padding="md">
-          <span className="text-[11px] text-muted uppercase font-semibold">AppData / Support</span>
-          <div className="text-xl font-bold font-mono text-primary mt-1">—</div>
-          <span className="text-[11px] text-muted">Awaiting scan</span>
+          <span className="text-[11px] text-accent uppercase font-semibold">Total App Storage</span>
+          <div className="text-xl font-bold font-mono text-accent mt-1">{formatBytes(totalAppBytes)}</div>
+          <span className="text-[11px] text-muted">Binaries & application support</span>
         </Card>
         <Card padding="md">
-          <span className="text-[11px] text-muted uppercase font-semibold">Residual Files</span>
-          <div className="text-xl font-bold font-mono text-primary mt-1">0</div>
-          <span className="text-[11px] text-muted">Orphaned configs</span>
+          <span className="text-[11px] text-muted uppercase font-semibold">Indexed App Files</span>
+          <div className="text-xl font-bold font-mono text-primary mt-1">{formatNumber(totalFiles)}</div>
+          <span className="text-[11px] text-muted">Packages and dependencies</span>
         </Card>
       </div>
 
@@ -89,8 +133,8 @@ export const ApplicationsView: React.FC = () => {
         </h2>
         <DataTable
           columns={columns}
-          data={[]}
-          emptyMessage="No application inventory has been indexed yet. Click 'Analyze Applications' to map software packages and their AppData footprints."
+          data={apps}
+          emptyMessage="No application inventory has been indexed yet. Run a drive scan or click 'Analyze Applications' to map software packages and their AppData footprints."
         />
       </div>
     </div>

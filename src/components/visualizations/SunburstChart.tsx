@@ -51,11 +51,31 @@ export const SunburstChart: React.FC<SunburstProps> = ({
     isDirectory: boolean;
   } | null>(null);
 
-  useEffect(() => {
-    if (!svgRef.current || !containerRef.current || !data) return;
+  const [dimensions, setDimensions] = useState<{ width: number; height: number }>({
+    width: 700,
+    height: 480,
+  });
 
-    const width = containerRef.current.clientWidth || 700;
-    const height = Math.max(containerRef.current.clientHeight, 480);
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const w = entry.contentRect.width;
+        const h = Math.max(entry.contentRect.height, 480);
+        if (w > 0) {
+          setDimensions({ width: w, height: h });
+        }
+      }
+    });
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!svgRef.current || !data) return;
+
+    const width = dimensions.width;
+    const height = dimensions.height;
     const radius = Math.min(width, height) / 2 - 20;
 
     const svg = d3.select(svgRef.current);
@@ -163,7 +183,7 @@ export const SunburstChart: React.FC<SunburstProps> = ({
       .attr('font-size', '10px')
       .attr('font-family', 'monospace')
       .text(formatBytes(data.value));
-  }, [data, onDrillDown, onNavigateUp]);
+  }, [data, dimensions, onDrillDown, onNavigateUp]);
 
   return (
     <div className="space-y-2">

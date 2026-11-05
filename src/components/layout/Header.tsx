@@ -34,6 +34,7 @@ export const Header: React.FC = () => {
     dashboard: 'Dashboard',
     explorer: 'Drive Explorer',
     analysis: 'Storage Analysis',
+    intelligence: 'Storage Intelligence',
     developer: 'Developer Storage',
     hidden: 'Hidden Files',
     applications: 'Applications',

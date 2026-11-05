@@ -26,6 +26,7 @@ export const DuplicateFinderView: React.FC = () => {
     searchDuplicates,
     selectedSessionId,
     setSelectedSessionId,
+    error,
   } = useAdvancedAnalysisStore();
 
   const { sessionsPage, fetchSessions } = useHistoryStore();
@@ -50,6 +51,9 @@ export const DuplicateFinderView: React.FC = () => {
 
   const handleMinSizePreset = (bytes: number) => {
     setDuplicateQuery({ minSizeBytes: bytes });
+    setTimeout(() => {
+      searchDuplicates();
+    }, 0);
   };
 
   return (
@@ -180,6 +184,11 @@ export const DuplicateFinderView: React.FC = () => {
               placeholder="e.g. mp4, zip, iso..."
               value={duplicateQuery.extension || ''}
               onChange={(e) => setDuplicateQuery({ extension: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  searchDuplicates();
+                }
+              }}
               className="bg-[#15171B] border border-border rounded px-2 py-0.5 text-xs text-primary font-mono placeholder-muted focus:outline-none focus:border-accent w-32"
             />
           </div>
@@ -203,6 +212,16 @@ export const DuplicateFinderView: React.FC = () => {
             <h3 className="text-sm font-semibold text-primary">Running Staged Duplicate Analysis</h3>
             <p className="text-xs text-muted max-w-sm mx-auto">
               Comparing size partitions and computing cryptographic SHA-256 hashes on matching candidates...
+            </p>
+          </Card>
+        ) : error ? (
+          <Card padding="lg" className="text-center py-12 space-y-2">
+            <ShieldCheck className="w-8 h-8 text-warning mx-auto" />
+            <h3 className="text-sm font-semibold text-primary">Duplicate Analysis Notice</h3>
+            <p className="text-xs text-muted max-w-sm mx-auto">
+              {error.includes('No completed scan')
+                ? 'No completed scan session found in the local database. Please start a filesystem scan to analyze duplicates.'
+                : error}
             </p>
           </Card>
         ) : !duplicateResult || duplicateResult.groups.length === 0 ? (

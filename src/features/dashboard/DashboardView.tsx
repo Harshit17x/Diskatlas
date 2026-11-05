@@ -41,7 +41,8 @@ export const DashboardView: React.FC = () => {
     if (drives.length === 0) {
       fetchDrives();
     }
-  }, [drives.length, fetchDrives]);
+    fetchAnalytics();
+  }, [drives.length, fetchDrives, fetchAnalytics]);
 
   // Dynamic category breakdown: use real SQLite-indexed scan analytics if available,
   // otherwise calculate from live detected drive storage

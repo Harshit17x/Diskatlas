@@ -68,25 +68,29 @@ export const App: React.FC = () => {
             break;
           case '4':
             e.preventDefault();
-            setActiveTab('developer');
+            setActiveTab('intelligence');
             break;
           case '5':
             e.preventDefault();
-            setActiveTab('hidden');
+            setActiveTab('developer');
             break;
           case '6':
             e.preventDefault();
-            setActiveTab('applications');
+            setActiveTab('hidden');
             break;
           case '7':
             e.preventDefault();
-            setActiveTab('duplicates');
+            setActiveTab('applications');
             break;
           case '8':
             e.preventDefault();
-            setActiveTab('cleanup');
+            setActiveTab('duplicates');
             break;
           case '9':
+            e.preventDefault();
+            setActiveTab('cleanup');
+            break;
+          case '0':
             e.preventDefault();
             setActiveTab('history');
             break;

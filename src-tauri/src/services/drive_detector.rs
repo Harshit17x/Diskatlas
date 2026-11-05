@@ -422,7 +422,10 @@ mod unix_impl {
 
             let is_system = mount_path == "/";
             let label = if is_system {
-                "Macintosh HD".to_string()
+                #[cfg(target_os = "macos")]
+                { "Macintosh HD".to_string() }
+                #[cfg(not(target_os = "macos"))]
+                { "Root Filesystem".to_string() }
             } else if !disk_name.trim().is_empty() {
                 disk_name.clone()
             } else {
@@ -479,7 +482,10 @@ mod unix_impl {
             };
 
             let id = if is_system {
-                "Macintosh HD".to_string()
+                #[cfg(target_os = "macos")]
+                { "Macintosh HD".to_string() }
+                #[cfg(not(target_os = "macos"))]
+                { "root".to_string() }
             } else if !disk_name.is_empty() {
                 disk_name
             } else {
@@ -527,7 +533,10 @@ mod unix_impl {
         }
 
         let bus_type = if drive.is_system {
-            Some("Apple Fabric / NVMe".into())
+            #[cfg(target_os = "macos")]
+            { Some("Apple Fabric / NVMe".into()) }
+            #[cfg(not(target_os = "macos"))]
+            { Some("SATA / NVMe Root Volume".into()) }
         } else if drive.is_removable {
             Some("USB / External Interface".into())
         } else {

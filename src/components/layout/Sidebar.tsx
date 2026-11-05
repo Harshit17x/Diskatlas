@@ -30,16 +30,16 @@ export const Sidebar: React.FC = () => {
     { id: 'analysis', label: 'Storage Analysis', category: 'core', shortcut: '⌘3' },
 
     // Intelligence
-    { id: 'intelligence', label: 'Storage Intelligence', category: 'intelligence' },
-    { id: 'developer', label: 'Developer Storage', category: 'intelligence' },
-    { id: 'hidden', label: 'Hidden Files', category: 'intelligence' },
-    { id: 'applications', label: 'Applications', category: 'intelligence' },
-    { id: 'duplicates', label: 'Duplicate Finder', category: 'intelligence' },
-    { id: 'cleanup', label: 'Cleanup Center', category: 'intelligence' },
+    { id: 'intelligence', label: 'Storage Intelligence', category: 'intelligence', shortcut: '⌘4' },
+    { id: 'developer', label: 'Developer Storage', category: 'intelligence', shortcut: '⌘5' },
+    { id: 'hidden', label: 'Hidden Files', category: 'intelligence', shortcut: '⌘6' },
+    { id: 'applications', label: 'Applications', category: 'intelligence', shortcut: '⌘7' },
+    { id: 'duplicates', label: 'Duplicate Finder', category: 'intelligence', shortcut: '⌘8' },
+    { id: 'cleanup', label: 'Cleanup Center', category: 'intelligence', shortcut: '⌘9' },
 
     // System
-    { id: 'history', label: 'Storage History', category: 'system' },
-    { id: 'settings', label: 'Settings', category: 'system' },
+    { id: 'history', label: 'Storage History', category: 'system', shortcut: '⌘0' },
+    { id: 'settings', label: 'Settings', category: 'system', shortcut: '⌘,' },
   ];
 
   const getIcon = (id: ActiveTab) => {

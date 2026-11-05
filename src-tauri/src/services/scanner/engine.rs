@@ -502,7 +502,6 @@ impl ScanEngine {
             let dir_name = current_dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| current_dir.to_string_lossy().to_string());
             let is_dir_hidden = dir_name.starts_with('.');
 
-            dirs_scanned += 1;
             dir_map.insert(current_dir.to_string_lossy().to_string(), RawDirItem {
                 path: current_dir.to_string_lossy().to_string(),
                 name: dir_name,

@@ -59,11 +59,31 @@ export const TreemapChart: React.FC<TreemapProps> = ({
     isDirectory: boolean;
   } | null>(null);
 
-  useEffect(() => {
-    if (!svgRef.current || !containerRef.current || !data) return;
+  const [dimensions, setDimensions] = useState<{ width: number; height: number }>({
+    width: 800,
+    height: 480,
+  });
 
-    const width = containerRef.current.clientWidth || 800;
-    const height = Math.max(containerRef.current.clientHeight, 480);
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const w = entry.contentRect.width;
+        const h = Math.max(entry.contentRect.height, 480);
+        if (w > 0) {
+          setDimensions({ width: w, height: h });
+        }
+      }
+    });
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!svgRef.current || !data) return;
+
+    const width = dimensions.width;
+    const height = dimensions.height;
 
     const svg = d3.select(svgRef.current);
     svg.selectAll('*').remove();
@@ -179,7 +199,7 @@ export const TreemapChart: React.FC<TreemapProps> = ({
       .attr('font-size', '9px')
       .attr('font-mono', 'true')
       .text((d) => formatBytes(d.value || d.data.value));
-  }, [data, onDrillDown]);
+  }, [data, dimensions, onDrillDown]);
 
   return (
     <div className="space-y-2">
