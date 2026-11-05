@@ -22,6 +22,10 @@ pub struct RawFileItem {
     pub is_hidden: bool,
     pub is_system: bool,
     pub is_symlink: bool,
+    pub category: String,
+    pub subcategory: Option<String>,
+    pub app_name: Option<String>,
+    pub confidence: f64,
 }
 
 #[derive(Debug, Clone)]

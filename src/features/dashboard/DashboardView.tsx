@@ -43,9 +43,11 @@ export const DashboardView: React.FC = () => {
     }
   }, [drives.length, fetchDrives]);
 
-  // Derived category breakdown (using analytics if available, or realistic volume allocation)
-  const categorySegments = analyticsData?.categoryDistribution?.length
-    ? analyticsData.categoryDistribution.map((c) => ({
+  // Dynamic category breakdown: use real SQLite-indexed scan analytics if available,
+  // otherwise calculate from live detected drive storage
+  const hasScannedData = Boolean(analyticsData?.categoryDistribution?.length);
+  const categorySegments = hasScannedData
+    ? analyticsData!.categoryDistribution.map((c) => ({
         name: c.category,
         bytes: c.totalBytes,
         percent: totalCapacity > 0 ? (c.totalBytes / totalCapacity) * 100 : 0,
@@ -62,14 +64,11 @@ export const DashboardView: React.FC = () => {
             ? '#ec4899'
             : '#8b5cf6',
       }))
-    : [
-        { name: 'Documents', bytes: 172.8 * 1024 * 1024 * 1024, percent: 36.8, color: '#f97316' },
-        { name: 'System Data', bytes: 109.8 * 1024 * 1024 * 1024, percent: 23.4, color: '#64748b' },
-        { name: 'Applications', bytes: 100.7 * 1024 * 1024 * 1024, percent: 21.4, color: '#f59e0b' },
-        { name: 'Other Users & Shared', bytes: 47.4 * 1024 * 1024 * 1024, percent: 10.1, color: '#10b981' },
-        { name: 'macOS System', bytes: 29.6 * 1024 * 1024 * 1024, percent: 6.3, color: '#8b5cf6' },
-        { name: 'Developer', bytes: 10.0 * 1024 * 1024 * 1024, percent: 2.1, color: '#3b82f6' },
-      ];
+    : totalCapacity > 0
+    ? [
+        { name: 'Used Storage', bytes: totalUsed, percent: overallPercent, color: '#3b82f6' },
+      ]
+    : [];
 
   const handleQuickScan = () => {
     if (primaryDrive) {
@@ -301,6 +300,17 @@ export const DashboardView: React.FC = () => {
             </div>
           ))}
         </div>
+
+        {!hasScannedData && (
+          <div className="flex flex-col sm:flex-row items-center justify-between p-3 bg-accent/5 border border-accent/20 rounded-lg gap-2 text-xs">
+            <span className="text-secondary">
+              Scan your storage to discover exact category breakdowns across Documents, Developer, System Data, and Applications.
+            </span>
+            <Button size="sm" variant="primary" icon={<Play className="w-3 h-3" />} onClick={handleQuickScan}>
+              Scan Now
+            </Button>
+          </div>
+        )}
       </Card>
 
       {/* Discovered Storage Drives */}

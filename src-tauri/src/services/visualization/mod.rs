@@ -452,7 +452,7 @@ impl VisualizationService {
 
         let latest: Option<String> = conn
             .query_row(
-                "SELECT id FROM scan_sessions WHERE status IN ('completed', 'interrupted') ORDER BY started_at DESC LIMIT 1",
+                "SELECT id FROM scan_sessions WHERE status IN ('completed', 'completedWithErrors', 'completed_with_errors', 'interrupted') ORDER BY started_at DESC LIMIT 1",
                 [],
                 |row| row.get(0),
             )

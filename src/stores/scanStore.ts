@@ -7,6 +7,24 @@ import type {
 } from '../types/bindings';
 import { safeInvoke } from '../utils/tauri';
 
+let pollInterval: ReturnType<typeof setInterval> | null = null;
+let elapsedTimer: ReturnType<typeof setInterval> | null = null;
+let scanStartTime = 0;
+
+const stopPolling = () => {
+  if (pollInterval) {
+    clearInterval(pollInterval);
+    pollInterval = null;
+  }
+};
+
+const stopElapsedTimer = () => {
+  if (elapsedTimer) {
+    clearInterval(elapsedTimer);
+    elapsedTimer = null;
+  }
+};
+
 interface ScanState {
   // Modal & Target selection
   isModalOpen: boolean;
@@ -131,6 +149,58 @@ export const useScanStore = create<ScanState>((set, get) => ({
           elapsedMillis: 0,
         },
       });
+
+      // Start active real-time elapsed timer
+      scanStartTime = Date.now();
+      stopElapsedTimer();
+      elapsedTimer = setInterval(() => {
+        const { isScanning, isPaused } = get();
+        if (!isScanning) {
+          stopElapsedTimer();
+          return;
+        }
+        if (!isPaused) {
+          const elapsed = Date.now() - scanStartTime;
+          set((s) => (s.progress ? { progress: { ...s.progress, elapsedMillis: elapsed } } : {}));
+        }
+      }, 100);
+
+      // Start reliable fallback polling heartbeat (every 200ms)
+      stopPolling();
+      pollInterval = setInterval(async () => {
+        const curSession = get().activeSessionId;
+        const scanning = get().isScanning;
+        if (!scanning || !curSession) {
+          stopPolling();
+          stopElapsedTimer();
+          return;
+        }
+
+        const pollRes = await safeInvoke<ScanProgress>('get_scan_progress', {
+          sessionId: curSession,
+        });
+
+        if (pollRes.ok) {
+          const p = pollRes.data;
+          set({
+            progress: p,
+            isScanning: p.status === 'running' || p.status === 'paused',
+            isPaused: p.status === 'paused',
+          });
+
+          if (
+            p.status === 'completed' ||
+            p.status === 'completedWithErrors' ||
+            p.status === 'cancelled' ||
+            p.status === 'failed' ||
+            p.status === 'interrupted'
+          ) {
+            stopPolling();
+            stopElapsedTimer();
+          }
+        }
+      }, 200);
+
       return sessionId;
     } else {
       set({
@@ -168,6 +238,8 @@ export const useScanStore = create<ScanState>((set, get) => ({
   },
 
   cancelScan: async () => {
+    stopPolling();
+    stopElapsedTimer();
     const { activeSessionId } = get();
     if (!activeSessionId) return;
 
@@ -179,6 +251,8 @@ export const useScanStore = create<ScanState>((set, get) => ({
   },
 
   resetScan: () => {
+    stopPolling();
+    stopElapsedTimer();
     set({
       activeSessionId: null,
       isScanning: false,
@@ -227,6 +301,7 @@ export const useScanStore = create<ScanState>((set, get) => ({
   setupEventListeners: async () => {
     let unlistenProgress: UnlistenFn | undefined;
     let unlistenCompleted: UnlistenFn | undefined;
+    let unlistenError: UnlistenFn | undefined;
 
     try {
       unlistenProgress = await listen<ScanProgress>('scan://progress', (event) => {
@@ -245,6 +320,8 @@ export const useScanStore = create<ScanState>((set, get) => ({
       });
 
       unlistenCompleted = await listen<ScanSummary>('scan://completed', (event) => {
+        stopPolling();
+        stopElapsedTimer();
         const summary = event.payload;
         set((state) => {
           if (state.activeSessionId && state.activeSessionId !== summary.sessionId) {
@@ -280,13 +357,26 @@ export const useScanStore = create<ScanState>((set, get) => ({
           useVisualizationStore.getState().fetchAnalytics(summary.sessionId);
         });
       });
+
+      unlistenError = await listen<string>('scan://error', (event) => {
+        stopPolling();
+        stopElapsedTimer();
+        set({
+          isScanning: false,
+          isPaused: false,
+          error: event.payload || 'An unexpected scan error occurred',
+        });
+      });
     } catch (err) {
       console.warn('Could not register Tauri scan event listeners:', err);
     }
 
     return () => {
+      stopPolling();
+      stopElapsedTimer();
       unlistenProgress?.();
       unlistenCompleted?.();
+      unlistenError?.();
     };
   },
 }));

@@ -16,6 +16,7 @@ use crate::storage::DbPool;
 
 pub struct ActiveScanHandle {
     pub session_id: String,
+    pub start_time: std::time::Instant,
     pub status: Arc<AtomicU8>,
     pub pause_notify: Arc<tokio::sync::Notify>,
     pub progress: Arc<Mutex<ScanProgress>>,
@@ -82,8 +83,10 @@ impl ScanManager {
         };
         let progress = Arc::new(Mutex::new(initial_progress));
 
+        let start_time = std::time::Instant::now();
         let handle = Arc::new(ActiveScanHandle {
             session_id: session_id.clone(),
+            start_time,
             status: Arc::clone(&status),
             pause_notify: Arc::clone(&pause_notify),
             progress: Arc::clone(&progress),
@@ -103,8 +106,12 @@ impl ScanManager {
         };
 
         // Spawn background async task
+        let sid_err = session_id.clone();
+        let status_err = Arc::clone(&status);
+        let progress_err = Arc::clone(&progress);
+        let handle_err = app_handle.clone();
         tokio::spawn(async move {
-            let _ = ScanEngine::run_scan(
+            let res = ScanEngine::run_scan(
                 options,
                 status,
                 pause_notify,
@@ -113,6 +120,19 @@ impl ScanManager {
                 app_handle,
             )
             .await;
+
+            if let Err(err) = res {
+                tracing::error!("ScanEngine error on session '{}': {:?}", sid_err, err);
+                status_err.store(crate::services::scanner::engine::STATUS_FAILED, Ordering::SeqCst);
+                {
+                    let mut p = progress_err.lock().unwrap();
+                    p.status = ScanStatus::Failed;
+                }
+                if let Some(ref handle) = handle_err {
+                    use tauri::Emitter;
+                    handle.emit("scan://error", &err.to_string()).ok();
+                }
+            }
         });
 
         Ok(session_id)
@@ -175,8 +195,11 @@ impl ScanManager {
         {
             let map = self.sessions.lock().unwrap();
             if let Some(handle) = map.get(session_id) {
-                let p = handle.progress.lock().unwrap();
-                return Ok(p.clone());
+                let mut p = handle.progress.lock().unwrap().clone();
+                if p.status == ScanStatus::Running {
+                    p.elapsed_millis = handle.start_time.elapsed().as_millis() as u64;
+                }
+                return Ok(p);
             }
         }
 
