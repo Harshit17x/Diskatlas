@@ -1,0 +1,14 @@
+{
+  "version": "1.0.0",
+  "workflow": {
+    "discuss": true,
+    "plan": true,
+    "verify": true,
+    "security": true
+  },
+  "model_profile": "quality",
+  "intel": {
+    "enabled": true
+  }
+}
+

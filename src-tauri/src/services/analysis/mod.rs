@@ -246,30 +246,37 @@ impl AnalysisService {
 
         info!(session_id = %session_id, min_size = min_size, "Starting staged duplicate detection");
 
-        // STAGE 1: Find all size_bytes with COUNT(*) > 1
-        let mut ext_filter = String::new();
-        if let Some(ext) = &query.extension {
-            let clean = ext.trim().trim_start_matches('.').to_lowercase();
-            if !clean.is_empty() {
-                ext_filter = format!(" AND LOWER(extension) = '{}'", clean);
-            }
-        }
+        // STAGE 1: Find all size_bytes with COUNT(*) > 1 (strictly parameterized)
+        let clean_ext = query.extension.as_ref().and_then(|ext| {
+            let c = ext.trim().trim_start_matches('.').to_lowercase();
+            if c.is_empty() { None } else { Some(c) }
+        });
 
-        let stage1_sql = format!(
-            "SELECT size_bytes, COUNT(*) as cnt
-             FROM files
-             WHERE session_id = ?1 AND size_bytes >= ?2 {}
-             GROUP BY size_bytes
-             HAVING cnt > 1
-             ORDER BY size_bytes DESC",
-            ext_filter
-        );
-
-        let mut stmt = conn.prepare(&stage1_sql)?;
-        let size_buckets: Vec<i64> = stmt
-            .query_map(params![&session_id, min_size], |row| row.get(0))?
-            .filter_map(|r| r.ok())
-            .collect();
+        let size_buckets: Vec<i64> = if let Some(ref ext) = clean_ext {
+            let stage1_sql = "SELECT size_bytes, COUNT(*) as cnt
+                              FROM files
+                              WHERE session_id = ?1 AND size_bytes >= ?2 AND LOWER(extension) = ?3
+                              GROUP BY size_bytes
+                              HAVING cnt > 1
+                              ORDER BY size_bytes DESC";
+            let mut stmt = conn.prepare(stage1_sql)?;
+            let rows = stmt.query_map(params![&session_id, min_size, ext], |row| row.get(0))?;
+            let buckets: Vec<i64> = rows.filter_map(|r| r.ok()).collect();
+            drop(stmt);
+            buckets
+        } else {
+            let stage1_sql = "SELECT size_bytes, COUNT(*) as cnt
+                              FROM files
+                              WHERE session_id = ?1 AND size_bytes >= ?2
+                              GROUP BY size_bytes
+                              HAVING cnt > 1
+                              ORDER BY size_bytes DESC";
+            let mut stmt = conn.prepare(stage1_sql)?;
+            let rows = stmt.query_map(params![&session_id, min_size], |row| row.get(0))?;
+            let buckets: Vec<i64> = rows.filter_map(|r| r.ok()).collect();
+            drop(stmt);
+            buckets
+        };
 
         info!(buckets_count = size_buckets.len(), "Stage 1 complete: candidate size buckets identified");
 

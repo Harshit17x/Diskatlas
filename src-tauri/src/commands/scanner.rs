@@ -17,7 +17,17 @@ pub async fn start_scan(
     app_handle: AppHandle,
 ) -> Result<String> {
     info!("[IPC] start_scan invoked: path='{}', drive_id='{}'", path, drive_id);
-    let root_path = PathBuf::from(&path);
+    let root_path = if path == "~" {
+        std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"))
+    } else if path.starts_with("~/") || path.starts_with("~\\") {
+        if let Ok(home) = std::env::var("HOME") {
+            std::path::PathBuf::from(home).join(&path[2..])
+        } else {
+            std::path::PathBuf::from(&path)
+        }
+    } else {
+        std::path::PathBuf::from(&path)
+    };
     let session_id = manager.start_scan(root_path, drive_id, exclusions, (*db).clone(), Some(app_handle))?;
     info!("[IPC] start_scan session created: '{}'", session_id);
     Ok(session_id)

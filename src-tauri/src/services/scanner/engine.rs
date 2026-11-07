@@ -30,6 +30,8 @@ impl ScanEngine {
         bytes_scanned: u64,
         error_count: u64,
         current_path: &Path,
+        current_file: Option<&str>,
+        recent_files: &[String],
         start_time: Instant,
         progress: &Arc<Mutex<ScanProgress>>,
         app_handle: &Option<AppHandle>,
@@ -39,6 +41,7 @@ impl ScanEngine {
         // Always keep the shared in-memory progress struct updated so get_scan_progress queries see live numbers
         let elapsed_millis = start_time.elapsed().as_millis() as u64;
         let path_str = current_path.to_string_lossy().to_string();
+        let file_opt = current_file.map(|s| s.to_string());
 
         if let Ok(mut p) = progress.lock() {
             p.files_scanned = files_scanned;
@@ -46,11 +49,15 @@ impl ScanEngine {
             p.bytes_scanned = bytes_scanned;
             p.error_count = error_count;
             p.current_path = path_str.clone();
+            p.current_file = file_opt.clone().or_else(|| Some(path_str.clone()));
+            if !recent_files.is_empty() {
+                p.recent_files = recent_files.to_vec();
+            }
             p.elapsed_millis = elapsed_millis;
         }
 
-        // Throttle UI event emissions over Tauri IPC to prevent webview event starvation
-        if force || last_emit.elapsed() >= Duration::from_millis(100) {
+        // Throttle UI event emissions over Tauri IPC to prevent webview event starvation (emit at least every 80ms)
+        if force || last_emit.elapsed() >= Duration::from_millis(80) {
             if let Some(ref handle) = app_handle {
                 let current_progress = ScanProgress {
                     session_id: options.session_id.clone(),
@@ -61,7 +68,9 @@ impl ScanEngine {
                     dirs_scanned,
                     bytes_scanned,
                     error_count,
-                    current_path: path_str,
+                    current_path: path_str.clone(),
+                    current_file: file_opt.or_else(|| Some(path_str)),
+                    recent_files: recent_files.to_vec(),
                     elapsed_millis,
                 };
                 handle.emit("scan://progress", &current_progress).ok();
@@ -185,6 +194,10 @@ impl ScanEngine {
         let mut dirs_scanned: u64 = 0;
         let mut bytes_scanned: u64 = 0;
         let mut error_count: u64 = 0;
+        let root_display = options.root_path.to_string_lossy().to_string();
+        #[allow(unused_assignments)]
+        let mut current_file: Option<String> = None;
+        let mut recent_files: Vec<String> = vec![root_display.clone()];
         // Initialize last_emit 200ms in the past so the first visited directory immediately emits live feedback to UI
         let mut last_emit = Instant::now().checked_sub(Duration::from_millis(200)).unwrap_or_else(Instant::now);
         let mut loop_counter: usize = 0;
@@ -200,7 +213,9 @@ impl ScanEngine {
                 dirs_scanned: 0,
                 bytes_scanned: 0,
                 error_count: 0,
-                current_path: options.root_path.to_string_lossy().to_string(),
+                current_path: root_display.clone(),
+                current_file: Some(root_display),
+                recent_files: recent_files.clone(),
                 elapsed_millis: 0,
             };
             handle.emit("scan://progress", &initial).ok();
@@ -209,7 +224,16 @@ impl ScanEngine {
         while let Some(current_dir) = dir_stack.pop() {
             loop_counter += 1;
 
-            // Emit live progress immediately when visiting a new directory
+            let cur_dir_str = current_dir.to_string_lossy().to_string();
+            current_file = Some(cur_dir_str.clone());
+            if recent_files.len() >= 10 {
+                recent_files.remove(0);
+            }
+            if !recent_files.contains(&cur_dir_str) {
+                recent_files.push(cur_dir_str);
+            }
+
+            // Emit live progress immediately when visiting a new directory (force emit for first 10 directories)
             Self::emit_progress_if_needed(
                 &options,
                 files_scanned,
@@ -217,11 +241,13 @@ impl ScanEngine {
                 bytes_scanned,
                 error_count,
                 &current_dir,
+                current_file.as_deref(),
+                &recent_files,
                 start_time,
                 &progress,
                 &app_handle,
                 &mut last_emit,
-                false,
+                loop_counter <= 10,
             );
 
             // Cooperative yielding on dedicated OS thread to avoid CPU monopolization
@@ -265,6 +291,8 @@ impl ScanEngine {
                     bytes_scanned,
                     error_count,
                     &current_dir,
+                    current_file.as_deref(),
+                    &recent_files,
                     start_time,
                     &progress,
                     &app_handle,
@@ -285,6 +313,8 @@ impl ScanEngine {
                     bytes_scanned,
                     error_count,
                     &current_dir,
+                    current_file.as_deref(),
+                    &recent_files,
                     start_time,
                     &progress,
                     &app_handle,
@@ -309,6 +339,8 @@ impl ScanEngine {
                             bytes_scanned,
                             error_count,
                             &current_dir,
+                            current_file.as_deref(),
+                            &recent_files,
                             start_time,
                             &progress,
                             &app_handle,
@@ -331,6 +363,8 @@ impl ScanEngine {
                             bytes_scanned,
                             error_count,
                             &current_dir,
+                            current_file.as_deref(),
+                            &recent_files,
                             start_time,
                             &progress,
                             &app_handle,
@@ -345,8 +379,12 @@ impl ScanEngine {
             // Read directory contents safely (read-only)
             let read_dir_result = fs::read_dir(&current_dir);
             let entries = match read_dir_result {
-                Ok(entries) => entries,
+                Ok(entries) => {
+                    dirs_scanned += 1;
+                    entries
+                }
                 Err(err) => {
+                    dirs_scanned += 1;
                     error_count += 1;
                     let err_type = match err.kind() {
                         std::io::ErrorKind::PermissionDenied => "PermissionDenied",
@@ -366,17 +404,18 @@ impl ScanEngine {
                         bytes_scanned,
                         error_count,
                         &current_dir,
+                        current_file.as_deref(),
+                        &recent_files,
                         start_time,
                         &progress,
                         &app_handle,
                         &mut last_emit,
-                        false,
+                        true,
                     );
                     continue;
                 }
             };
 
-            dirs_scanned += 1;
             let mut dir_file_count: u64 = 0;
             let mut dir_total_bytes: u64 = 0;
             let mut dir_subdirs: u64 = 0;
@@ -467,6 +506,12 @@ impl ScanEngine {
                     let (is_hidden, is_system) = Self::get_attributes(&entry_name, &meta, &entry_path);
                     let path_str = entry_path.to_string_lossy().to_string();
 
+                    current_file = Some(path_str.clone());
+                    if recent_files.len() >= 10 {
+                        recent_files.remove(0);
+                    }
+                    recent_files.push(path_str.clone());
+
                     // Microsecond in-memory classification during indexing avoids 15-minute post-scan DB table scans
                     let class_res = crate::services::classifier::rules::RuleMatcher::classify(
                         &path_str,
@@ -501,15 +546,17 @@ impl ScanEngine {
                         std::thread::yield_now();
                     }
 
-                    // Throttle in-batch progress updates for large directories (every 250 files)
-                    if files_scanned % 250 == 0 {
+                    // Throttle in-batch progress updates for large directories (emit on first file, every 30 files, or 80ms)
+                    if files_scanned == 1 || files_scanned % 30 == 0 || last_emit.elapsed() >= Duration::from_millis(80) {
                         Self::emit_progress_if_needed(
                             &options,
                             files_scanned,
                             dirs_scanned,
                             bytes_scanned,
                             error_count,
-                            &entry_path,
+                            &current_dir,
+                            current_file.as_deref(),
+                            &recent_files,
                             start_time,
                             &progress,
                             &app_handle,
@@ -551,6 +598,8 @@ impl ScanEngine {
                 bytes_scanned,
                 error_count,
                 &current_dir,
+                current_file.as_deref(),
+                &recent_files,
                 start_time,
                 &progress,
                 &app_handle,
@@ -633,6 +682,7 @@ impl ScanEngine {
             p.dirs_scanned = dirs_scanned;
             p.bytes_scanned = bytes_scanned;
             p.error_count = error_count;
+            p.current_file = None;
             p.elapsed_millis = final_summary.duration_millis;
         }
 

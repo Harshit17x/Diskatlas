@@ -3,6 +3,42 @@ use std::path::{Path, PathBuf};
 /// Inspects whether a path targets an essential operating system, boot, driver,
 /// or recovery component that must NEVER be modified or deleted.
 pub fn is_system_critical_path(path: &Path) -> (bool, Option<&'static str>) {
+    // 0. Pre-resolve relative traversal (..)
+    let path_str = path.to_string_lossy();
+    let has_parent_dir = path_str.contains("..") || path.components().any(|c| c == std::path::Component::ParentDir);
+
+    let normalized = if has_parent_dir {
+        // Cross-platform normalization for relative traversal sequences
+        let mut clean = Vec::new();
+        let parts: Vec<&str> = path_str.split(&['/', '\\'][..]).collect();
+        for part in parts {
+            if part.is_empty() || part == "." {
+                continue;
+            } else if part == ".." {
+                clean.pop();
+            } else {
+                clean.push(part);
+            }
+        }
+        let sep = if path_str.contains('\\') { "\\" } else { "/" };
+        let prefix = if path_str.starts_with('/') { "/" } else { "" };
+        let joined = format!("{}{}", prefix, clean.join(sep));
+        PathBuf::from(joined)
+    } else {
+        path.to_path_buf()
+    };
+
+    let (crit, reason) = check_path_against_rules(path);
+    if crit {
+        return (crit, reason);
+    }
+    if normalized != path {
+        return check_path_against_rules(&normalized);
+    }
+    (false, None)
+}
+
+fn check_path_against_rules(path: &Path) -> (bool, Option<&'static str>) {
     let path_str = path.to_string_lossy();
     let lower = path_str.to_lowercase().replace('/', "\\");
 
@@ -94,11 +130,17 @@ pub fn is_system_critical_path(path: &Path) -> (bool, Option<&'static str>) {
         "/dev",
         "/proc",
         "/sys",
-        "/private/var",
+        "/private/var/db",
+        "/private/var/root",
+        "/private/var/audit",
+        "/private/var/vm",
         "/library/extensions",
         "/library/apple",
     ];
     let normalized_unix = path_str.replace('\\', "/").to_lowercase();
+    if normalized_unix == "/private/var" || normalized_unix == "/private/var/" {
+        return (true, Some("Protected Unix / macOS core operating system path"));
+    }
     for ucr in unix_critical_roots {
         if normalized_unix == ucr || normalized_unix == format!("{}/", ucr) || normalized_unix.starts_with(&format!("{}/", ucr)) {
             return (true, Some("Protected Unix / macOS core operating system path"));
@@ -161,6 +203,10 @@ pub fn validate_path_safety(path_str: &str) -> std::result::Result<PathBuf, Stri
     }
 
     let path = PathBuf::from(path_str);
+    if path.components().any(|c| c == std::path::Component::ParentDir) {
+        return Err("Blocked by security safeguards: Relative path traversal (..) is not permitted".to_string());
+    }
+
     let (is_critical, reason) = is_system_critical_path(&path);
     if is_critical {
         return Err(format!(
@@ -196,6 +242,12 @@ mod tests {
         assert!(is_system_critical_path(Path::new("/bin/sh")).0);
         assert!(is_system_critical_path(Path::new("/etc/hosts")).0);
         assert!(is_system_critical_path(Path::new("/")).0);
+
+        // Traversal attempts targeting critical paths must be blocked
+        assert!(is_system_critical_path(Path::new("/Users/user/../../System")).0);
+        assert!(is_system_critical_path(Path::new("/Users/user/../../System/Library")).0);
+        assert!(is_system_critical_path(Path::new("C:\\Users\\user\\..\\..\\Windows\\System32")).0);
+        assert!(validate_path_safety("/Users/user/../../System").is_err());
 
         // Safe user paths (should NOT be marked critical)
         assert!(!is_system_critical_path(Path::new("C:\\Users\\User\\Downloads\\old_installer.exe")).0);

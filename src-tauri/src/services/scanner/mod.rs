@@ -98,6 +98,8 @@ mod tests {
             bytes_scanned: 0,
             error_count: 0,
             current_path: String::new(),
+            current_file: None,
+            recent_files: Vec::new(),
             elapsed_millis: 0,
         }));
 

@@ -34,20 +34,31 @@ export const App: React.FC = () => {
     }
   }, [theme]);
 
+  // Initial core system discovery
   useEffect(() => {
     fetchDrives();
     fetchSystemInfo();
     fetchDbHealth();
+  }, [fetchDrives, fetchSystemInfo, fetchDbHealth]);
 
-    let cleanup: (() => void) | undefined;
+  // Global scan event listeners registered once on mount
+  useEffect(() => {
+    let unlistenFn: (() => void) | undefined;
+    let isMounted = true;
+
     setupEventListeners().then((unlisten) => {
-      cleanup = unlisten;
+      if (isMounted) {
+        unlistenFn = unlisten;
+      } else {
+        unlisten();
+      }
     });
 
     return () => {
-      cleanup?.();
+      isMounted = false;
+      unlistenFn?.();
     };
-  }, [fetchDrives, fetchSystemInfo, fetchDbHealth, setupEventListeners]);
+  }, [setupEventListeners]);
 
   // Global keyboard shortcuts (Cmd+1 to Cmd+9)
   useEffect(() => {

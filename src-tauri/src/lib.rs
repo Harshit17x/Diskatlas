@@ -3,6 +3,7 @@ pub mod error;
 pub mod models;
 pub mod services;
 pub mod storage;
+pub mod tui;
 
 use std::path::PathBuf;
 use tauri::Manager;
@@ -131,4 +132,8 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running DiskAtlas desktop application");
+}
+
+pub fn run_tui(target_path: Option<PathBuf>) {
+    tui::launch_tui(target_path);
 }

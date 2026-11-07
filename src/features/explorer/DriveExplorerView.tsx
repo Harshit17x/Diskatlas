@@ -232,7 +232,7 @@ export const DriveExplorerView: React.FC = () => {
             variant="primary"
             size="sm"
             icon={<Play className="w-3.5 h-3.5" />}
-            onClick={() => openScanModal(selectedDrive?.mountPoint, selectedDrive?.id)}
+            onClick={() => openScanModal(selectedDrive?.mountPoint || drives[0]?.mountPoint || '/', selectedDrive?.id || drives[0]?.id)}
             title="Start Universal Recursive Storage Scanner"
           >
             Scan Root Path

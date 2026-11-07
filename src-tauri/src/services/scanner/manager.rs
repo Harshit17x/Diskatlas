@@ -79,6 +79,8 @@ impl ScanManager {
             bytes_scanned: 0,
             error_count: 0,
             current_path: path.to_string_lossy().to_string(),
+            current_file: None,
+            recent_files: Vec::new(),
             elapsed_millis: 0,
         };
         let progress = Arc::new(Mutex::new(initial_progress));
@@ -243,6 +245,8 @@ impl ScanManager {
                 bytes_scanned: bytes as u64,
                 error_count: errors as u64,
                 current_path: String::new(),
+                current_file: None,
+                recent_files: Vec::new(),
                 elapsed_millis: 0,
             })
         })?;

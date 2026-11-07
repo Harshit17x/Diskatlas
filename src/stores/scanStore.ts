@@ -94,10 +94,13 @@ export const useScanStore = create<ScanState>((set, get) => ({
   isLoadingFiles: false,
 
   openScanModal: (targetPath?: string, targetDriveId?: string) => {
+    const state = get();
     set({
       isModalOpen: true,
-      targetPath: targetPath ?? get().targetPath,
-      targetDriveId: targetDriveId ?? get().targetDriveId,
+      targetPath: targetPath ?? (state.targetPath || '/'),
+      targetDriveId: targetDriveId ?? state.targetDriveId,
+      summary: state.isScanning ? state.summary : null,
+      error: null,
     });
   },
 
@@ -109,7 +112,7 @@ export const useScanStore = create<ScanState>((set, get) => ({
 
   startScan: async (pathOverride?: string, driveIdOverride?: string) => {
     const state = get();
-    const finalPath = pathOverride || state.targetPath;
+    const finalPath = (pathOverride || state.targetPath || '/').trim();
     const finalDriveId = driveIdOverride || state.targetDriveId || 'DRIVE_PRIMARY';
 
     if (!finalPath.trim()) {
@@ -123,6 +126,7 @@ export const useScanStore = create<ScanState>((set, get) => ({
     stopPolling();
 
     set({
+      activeSessionId: 'starting',
       isScanning: true,
       isPaused: false,
       summary: null,
@@ -139,6 +143,8 @@ export const useScanStore = create<ScanState>((set, get) => ({
         bytesScanned: 0,
         errorCount: 0,
         currentPath: finalPath,
+        currentFile: null,
+        recentFiles: [],
         elapsedMillis: 0,
       },
     });
@@ -180,6 +186,8 @@ export const useScanStore = create<ScanState>((set, get) => ({
               bytesScanned: 0,
               errorCount: 0,
               currentPath: finalPath,
+              currentFile: null,
+              recentFiles: [],
               elapsedMillis: Date.now() - scanStartTime,
             },
       }));
@@ -359,9 +367,15 @@ export const useScanStore = create<ScanState>((set, get) => ({
       unlistenProgress = await listen<ScanProgress>('scan://progress', (event) => {
         const payload = event.payload;
         set((state) => {
-          // Only update if matching active session (or initializing)
-          if (state.activeSessionId && state.activeSessionId !== 'starting' && state.activeSessionId !== payload.sessionId) {
-            return {};
+          // If a scan is currently active, always sync with the running scan progress
+          if (
+            state.activeSessionId &&
+            state.activeSessionId !== 'starting' &&
+            state.activeSessionId !== payload.sessionId
+          ) {
+            if (!state.isScanning) {
+              return {};
+            }
           }
           return {
             activeSessionId: payload.sessionId,
@@ -378,7 +392,9 @@ export const useScanStore = create<ScanState>((set, get) => ({
         const summary = event.payload;
         set((state) => {
           if (state.activeSessionId && state.activeSessionId !== 'starting' && state.activeSessionId !== summary.sessionId) {
-            return {};
+            if (!state.isScanning) {
+              return {};
+            }
           }
           return {
             activeSessionId: summary.sessionId,
@@ -393,6 +409,7 @@ export const useScanStore = create<ScanState>((set, get) => ({
                   dirsScanned: summary.totalDirs,
                   bytesScanned: summary.totalBytes,
                   errorCount: summary.errorCount,
+                  currentFile: null,
                   elapsedMillis: summary.durationMillis,
                 }
               : null,
@@ -426,8 +443,6 @@ export const useScanStore = create<ScanState>((set, get) => ({
     }
 
     return () => {
-      stopPolling();
-      stopElapsedTimer();
       unlistenProgress?.();
       unlistenCompleted?.();
       unlistenError?.();

@@ -87,6 +87,8 @@ export interface ScanProgress {
   bytesScanned: number;
   errorCount: number;
   currentPath: string;
+  currentFile?: string | null;
+  recentFiles?: string[];
   elapsedMillis: number;
 }
 

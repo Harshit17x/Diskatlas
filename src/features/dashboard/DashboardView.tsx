@@ -23,6 +23,8 @@ import {
   Copy,
   ChevronRight,
   RefreshCw,
+  FileText,
+  Activity,
 } from 'lucide-react';
 
 export const DashboardView: React.FC = () => {
@@ -182,8 +184,41 @@ export const DashboardView: React.FC = () => {
             </div>
           </div>
 
-          <div className="text-[11px] font-mono text-muted truncate">
-            Current: <span className="text-secondary">{progress.currentPath}</span>
+          <div className="space-y-1.5 pt-1 border-t border-border/40">
+            <div className="text-[11px] font-mono text-muted truncate flex items-center justify-between">
+              <span>Directory: <span className="text-secondary">{progress.currentPath}</span></span>
+              {progress.currentFile && (
+                <span className="text-accent flex items-center gap-1 font-medium">
+                  <span className="w-1.5 h-1.5 rounded-full bg-accent animate-ping" />
+                  Tracking: {progress.currentFile.split('/').pop() || progress.currentFile}
+                </span>
+              )}
+            </div>
+
+            {progress.currentFile && (
+              <div className="p-1.5 rounded bg-panel/80 border border-accent/20 flex items-center gap-2 text-xs font-mono">
+                <FileText className="w-3.5 h-3.5 text-accent shrink-0 animate-pulse" />
+                <span className="text-primary truncate font-medium flex-1">
+                  {progress.currentFile}
+                </span>
+                <Badge variant="accent" size="sm">
+                  Active File
+                </Badge>
+              </div>
+            )}
+
+            {progress.recentFiles && progress.recentFiles.length > 0 && (
+              <div className="flex items-center gap-1.5 overflow-x-auto py-1 text-[10px] font-mono">
+                <span className="text-muted shrink-0 flex items-center gap-1">
+                  <Activity className="w-2.5 h-2.5 text-accent" /> Recent:
+                </span>
+                {progress.recentFiles.slice(-5).reverse().map((f, i) => (
+                  <span key={i} className="px-1.5 py-0.5 rounded bg-panel border border-border/60 text-secondary truncate max-w-[140px]" title={f}>
+                    {f.split('/').pop() || f}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         </Card>
       )}

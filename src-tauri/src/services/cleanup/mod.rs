@@ -373,7 +373,25 @@ impl CleanupService {
                 }
             } else {
                 // Permanent deletion fallback (only when user explicitly opted out of recycle bin)
-                let delete_res = if path_obj.is_dir() {
+                let is_symlink = std::fs::symlink_metadata(path_obj)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false);
+
+                let delete_res = if is_symlink {
+                    #[cfg(target_os = "windows")]
+                    {
+                        // On Windows, directory junctions and directory symlinks are unlinked via remove_dir
+                        if path_obj.is_dir() {
+                            std::fs::remove_dir(path_obj)
+                        } else {
+                            std::fs::remove_file(path_obj)
+                        }
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        std::fs::remove_file(path_obj)
+                    }
+                } else if path_obj.is_dir() {
                     std::fs::remove_dir_all(path_obj)
                 } else {
                     std::fs::remove_file(path_obj)
@@ -518,83 +536,115 @@ impl CleanupService {
         let page_size = query.page_size.clamp(1, 100);
         let offset = (page - 1) * page_size;
 
-        let (where_clause, count_sql, query_sql) = match (&query.session_id, &query.status) {
-            (Some(sid), Some(status)) => (
-                "WHERE session_id = ?1 AND status = ?2",
-                format!("SELECT count(*) FROM cleanup_audit_events WHERE session_id = '{}' AND status = '{}'", sid, status),
-                format!(
-                    "SELECT id, batch_id, session_id, path, name, size_bytes, category, risk_level,
-                            cleanup_method, status, is_reversible, error_message, created_at
-                     FROM cleanup_audit_events
-                     WHERE session_id = '{}' AND status = '{}'
-                     ORDER BY created_at DESC LIMIT {} OFFSET {}",
-                    sid, status, page_size, offset
-                ),
-            ),
-            (Some(sid), None) => (
-                "WHERE session_id = ?1",
-                format!("SELECT count(*) FROM cleanup_audit_events WHERE session_id = '{}'", sid),
-                format!(
-                    "SELECT id, batch_id, session_id, path, name, size_bytes, category, risk_level,
-                            cleanup_method, status, is_reversible, error_message, created_at
-                     FROM cleanup_audit_events
-                     WHERE session_id = '{}'
-                     ORDER BY created_at DESC LIMIT {} OFFSET {}",
-                    sid, page_size, offset
-                ),
-            ),
-            (None, Some(status)) => (
-                "WHERE status = ?1",
-                format!("SELECT count(*) FROM cleanup_audit_events WHERE status = '{}'", status),
-                format!(
-                    "SELECT id, batch_id, session_id, path, name, size_bytes, category, risk_level,
-                            cleanup_method, status, is_reversible, error_message, created_at
-                     FROM cleanup_audit_events
-                     WHERE status = '{}'
-                     ORDER BY created_at DESC LIMIT {} OFFSET {}",
-                    status, page_size, offset
-                ),
-            ),
-            (None, None) => (
-                "",
-                "SELECT count(*) FROM cleanup_audit_events".to_string(),
-                format!(
-                    "SELECT id, batch_id, session_id, path, name, size_bytes, category, risk_level,
-                            cleanup_method, status, is_reversible, error_message, created_at
-                     FROM cleanup_audit_events
-                     ORDER BY created_at DESC LIMIT {} OFFSET {}",
-                    page_size, offset
-                ),
-            ),
+        let base_count = "SELECT count(*) FROM cleanup_audit_events";
+        let base_select = "SELECT id, batch_id, session_id, path, name, size_bytes, category, risk_level,
+                                   cleanup_method, status, is_reversible, error_message, created_at
+                            FROM cleanup_audit_events";
+
+        let (total_items, items) = match (&query.session_id, &query.status) {
+            (Some(sid), Some(status)) => {
+                let c_sql = format!("{base_count} WHERE session_id = ?1 AND status = ?2");
+                let q_sql = format!("{base_select} WHERE session_id = ?1 AND status = ?2 ORDER BY created_at DESC LIMIT ?3 OFFSET ?4");
+                let total: usize = conn.query_row(&c_sql, rusqlite::params![sid, status], |row| row.get(0)).unwrap_or(0);
+                let mut stmt = conn.prepare(&q_sql)?;
+                let rows = stmt.query_map(rusqlite::params![sid, status, page_size, offset], |row| {
+                    Ok(CleanupAuditRecord {
+                        id: row.get(0)?,
+                        batch_id: row.get(1)?,
+                        session_id: row.get(2)?,
+                        path: row.get(3)?,
+                        name: row.get(4)?,
+                        size_bytes: row.get(5)?,
+                        category: row.get(6)?,
+                        risk_level: row.get(7)?,
+                        cleanup_method: row.get(8)?,
+                        status: row.get(9)?,
+                        is_reversible: row.get::<_, i64>(10)? != 0,
+                        error_message: row.get(11)?,
+                        created_at: row.get(12)?,
+                    })
+                })?;
+                let list: std::result::Result<Vec<_>, _> = rows.collect();
+                (total, list?)
+            }
+            (Some(sid), None) => {
+                let c_sql = format!("{base_count} WHERE session_id = ?1");
+                let q_sql = format!("{base_select} WHERE session_id = ?1 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3");
+                let total: usize = conn.query_row(&c_sql, rusqlite::params![sid], |row| row.get(0)).unwrap_or(0);
+                let mut stmt = conn.prepare(&q_sql)?;
+                let rows = stmt.query_map(rusqlite::params![sid, page_size, offset], |row| {
+                    Ok(CleanupAuditRecord {
+                        id: row.get(0)?,
+                        batch_id: row.get(1)?,
+                        session_id: row.get(2)?,
+                        path: row.get(3)?,
+                        name: row.get(4)?,
+                        size_bytes: row.get(5)?,
+                        category: row.get(6)?,
+                        risk_level: row.get(7)?,
+                        cleanup_method: row.get(8)?,
+                        status: row.get(9)?,
+                        is_reversible: row.get::<_, i64>(10)? != 0,
+                        error_message: row.get(11)?,
+                        created_at: row.get(12)?,
+                    })
+                })?;
+                let list: std::result::Result<Vec<_>, _> = rows.collect();
+                (total, list?)
+            }
+            (None, Some(status)) => {
+                let c_sql = format!("{base_count} WHERE status = ?1");
+                let q_sql = format!("{base_select} WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3");
+                let total: usize = conn.query_row(&c_sql, rusqlite::params![status], |row| row.get(0)).unwrap_or(0);
+                let mut stmt = conn.prepare(&q_sql)?;
+                let rows = stmt.query_map(rusqlite::params![status, page_size, offset], |row| {
+                    Ok(CleanupAuditRecord {
+                        id: row.get(0)?,
+                        batch_id: row.get(1)?,
+                        session_id: row.get(2)?,
+                        path: row.get(3)?,
+                        name: row.get(4)?,
+                        size_bytes: row.get(5)?,
+                        category: row.get(6)?,
+                        risk_level: row.get(7)?,
+                        cleanup_method: row.get(8)?,
+                        status: row.get(9)?,
+                        is_reversible: row.get::<_, i64>(10)? != 0,
+                        error_message: row.get(11)?,
+                        created_at: row.get(12)?,
+                    })
+                })?;
+                let list: std::result::Result<Vec<_>, _> = rows.collect();
+                (total, list?)
+            }
+            (None, None) => {
+                let c_sql = base_count;
+                let q_sql = format!("{base_select} ORDER BY created_at DESC LIMIT ?1 OFFSET ?2");
+                let total: usize = conn.query_row(c_sql, [], |row| row.get(0)).unwrap_or(0);
+                let mut stmt = conn.prepare(&q_sql)?;
+                let rows = stmt.query_map(rusqlite::params![page_size, offset], |row| {
+                    Ok(CleanupAuditRecord {
+                        id: row.get(0)?,
+                        batch_id: row.get(1)?,
+                        session_id: row.get(2)?,
+                        path: row.get(3)?,
+                        name: row.get(4)?,
+                        size_bytes: row.get(5)?,
+                        category: row.get(6)?,
+                        risk_level: row.get(7)?,
+                        cleanup_method: row.get(8)?,
+                        status: row.get(9)?,
+                        is_reversible: row.get::<_, i64>(10)? != 0,
+                        error_message: row.get(11)?,
+                        created_at: row.get(12)?,
+                    })
+                })?;
+                let list: std::result::Result<Vec<_>, _> = rows.collect();
+                (total, list?)
+            }
         };
-        let _ = where_clause;
 
-        let total_items: usize = conn.query_row(&count_sql, [], |row| row.get(0)).unwrap_or(0);
         let total_pages = ((total_items as f64) / (page_size as f64)).ceil() as u32;
-
-        let mut stmt = conn.prepare(&query_sql)?;
-        let rows = stmt.query_map([], |row| {
-            Ok(CleanupAuditRecord {
-                id: row.get(0)?,
-                batch_id: row.get(1)?,
-                session_id: row.get(2)?,
-                path: row.get(3)?,
-                name: row.get(4)?,
-                size_bytes: row.get(5)?,
-                category: row.get(6)?,
-                risk_level: row.get(7)?,
-                cleanup_method: row.get(8)?,
-                status: row.get(9)?,
-                is_reversible: row.get::<_, i64>(10)? != 0,
-                error_message: row.get(11)?,
-                created_at: row.get(12)?,
-            })
-        })?;
-
-        let mut items = Vec::new();
-        for r in rows {
-            items.push(r?);
-        }
 
         Ok(CleanupAuditResponse {
             items,

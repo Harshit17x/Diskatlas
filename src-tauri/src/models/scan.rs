@@ -40,6 +40,10 @@ pub struct ScanProgress {
     pub bytes_scanned: u64,
     pub error_count: u64,
     pub current_path: String,
+    #[serde(default)]
+    pub current_file: Option<String>,
+    #[serde(default)]
+    pub recent_files: Vec<String>,
     pub elapsed_millis: u64,
 }
 
