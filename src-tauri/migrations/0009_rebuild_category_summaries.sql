@@ -32,3 +32,4 @@ FROM (
     )
 )
 GROUP BY session_id, ext_category;
+
