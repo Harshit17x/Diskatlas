@@ -39,15 +39,16 @@ impl VisualizationService {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap_or_else(|_| {
-                // If directory record not found (e.g. root drive), query from scan_sessions
-                let session_bytes: i64 = conn
-                    .query_row(
-                        "SELECT COALESCE(total_bytes, 0), COALESCE(total_files, 0) FROM scan_sessions WHERE id = ?1",
-                        [&sid],
-                        |row| Ok(row.get(0)?),
-                    )
-                    .unwrap_or(0);
-                (session_bytes, 0)
+                // If directory record not found (e.g. a session scanned before the root row
+                // was introduced, or a non-standard root), fall back to the session totals.
+                // Both the size AND the file count are taken from scan_sessions so the root
+                // node never reports a hardcoded zero file count.
+                conn.query_row(
+                    "SELECT COALESCE(total_bytes, 0), COALESCE(total_files, 0) FROM scan_sessions WHERE id = ?1",
+                    [&sid],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap_or((0, 0))
             });
 
         let max_depth = query.max_depth.unwrap_or(3).clamp(1, 5);
@@ -229,10 +230,18 @@ impl VisualizationService {
         )?;
 
         // 1. Category Distribution
+        //
+        // `classification_summaries` is grouped by (category, subcategory, app_name), so
+        // every row carries a subcategory and the previous `AND subcategory IS NULL`
+        // predicate could never match — the chart always fell through to the fallback
+        // below. Aggregate the subcategory/app_name rows up to the category level here.
         let mut cat_stmt = conn.prepare(
-            "SELECT category, file_count, total_bytes
+            "SELECT category,
+                    SUM(file_count) as file_count,
+                    SUM(total_bytes) as total_bytes
              FROM classification_summaries
-             WHERE session_id = ?1 AND subcategory IS NULL
+             WHERE session_id = ?1
+             GROUP BY category
              ORDER BY total_bytes DESC"
         )?;
 
@@ -256,13 +265,15 @@ impl VisualizationService {
             .filter_map(|r| r.ok())
             .collect();
 
-        // Fallback: If classification_summaries is empty, aggregate directly from files table
+        // Fallback: If classification_summaries is empty, aggregate directly from files table.
+        // The expression is repeated in GROUP BY rather than relying on the `cat` alias so
+        // the grouping can never be bound to the `files.category` column by mistake.
         if category_distribution.is_empty() {
             let mut fallback_stmt = conn.prepare(
-                "SELECT COALESCE(category, 'unknown') as cat, COUNT(*), SUM(size_bytes)
+                "SELECT COALESCE(NULLIF(category, ''), 'unknown'), COUNT(*), COALESCE(SUM(size_bytes), 0)
                  FROM files
                  WHERE session_id = ?1
-                 GROUP BY cat
+                 GROUP BY COALESCE(NULLIF(category, ''), 'unknown')
                  ORDER BY SUM(size_bytes) DESC"
             )?;
 

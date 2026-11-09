@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use rusqlite::params;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::error::Result;
@@ -12,6 +12,22 @@ use crate::models::developer::{
 use crate::storage::DbPool;
 
 pub struct DeveloperService;
+
+/// Case-insensitive substring test that does not allocate a lowercased copy of the haystack.
+///
+/// The developer analysis classifies every file in a session, so allocating a lowercased
+/// copy of each path (millions of times) was a significant cost.
+fn contains_ci(haystack: &str, needle: &str) -> bool {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() {
+        return true;
+    }
+    if n.len() > h.len() {
+        return false;
+    }
+    h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+}
 
 impl DeveloperService {
     /// Discovers all software projects in a scan session, aggregates dependencies, caches, and build outputs.
@@ -53,7 +69,7 @@ impl DeveloperService {
         drop(marker_stmt);
 
         // Group markers by project root
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
         let mut project_roots: HashMap<String, Vec<String>> = HashMap::new();
         for m in markers {
             project_roots
@@ -62,7 +78,137 @@ impl DeveloperService {
                 .push(m.name);
         }
 
-        // 2. Clear old developer projects and summaries for this session
+        // Cap the number of projects analyzed in a single pass. A pathological filesystem
+        // (e.g. a monorepo with thousands of vendored checkouts) can produce tens of
+        // thousands of markers; analyzing them all would hold the database lock for a very
+        // long time. The largest projects are kept.
+        const MAX_PROJECTS: usize = 25_000;
+        let mut root_list: Vec<(String, Vec<String>)> = project_roots.into_iter().collect();
+        if root_list.len() > MAX_PROJECTS {
+            root_list.sort_by(|a, b| a.0.cmp(&b.0));
+            root_list.truncate(MAX_PROJECTS);
+            warn!(
+                "Developer analysis capped at {} projects for session '{}'",
+                MAX_PROJECTS, session_id
+            );
+        }
+
+        // Root lookup set, used to attribute each file to its owning project.
+        let root_set: HashSet<String> = root_list.iter().map(|(r, _)| r.clone()).collect();
+
+        // 2. Aggregate every file in the session in a SINGLE ordered pass.
+        //
+        // The previous implementation ran one `path LIKE 'root/%'` query per project root.
+        // Because that predicate cannot use the (session_id, path) index, each query scanned
+        // the whole session's file table — with ~19,000 roots and ~3.8M files that is
+        // roughly 7.3e10 row visits (measured at ~72 seconds for a *single* root), so the
+        // pipeline could never finish and the Developer Storage view stayed empty.
+        //
+        // Instead we stream the session's files once in path order and attribute each file
+        // to the deepest project root that is an ancestor of its path. This is a single
+        // sequential scan regardless of how many projects were discovered.
+        #[derive(Default, Clone, Copy)]
+        struct ProjectAgg {
+            dep_bytes: u64,
+            cache_bytes: u64,
+            build_bytes: u64,
+            total_bytes: u64,
+            file_count: u64,
+            max_modified: Option<i64>,
+        }
+
+        let mut aggregates: HashMap<String, ProjectAgg> = HashMap::new();
+
+        {
+            let mut file_stmt = conn.prepare(
+                "SELECT path, size_bytes, modified_at
+                 FROM files
+                 WHERE session_id = ?1
+                 ORDER BY path;",
+            )?;
+
+            let mut rows = file_stmt.query(params![session_id])?;
+            // Reusable buffer for ancestor-path construction (avoids per-file allocation).
+            let mut ancestor: String = String::with_capacity(512);
+
+            while let Some(row) = rows.next()? {
+                let fpath: String = row.get(0)?;
+                let fsize: i64 = row.get(1)?;
+                let fmod: Option<i64> = row.get(2)?;
+
+                // Find the deepest project root that is an ancestor of this file.
+                ancestor.clear();
+                ancestor.push_str(&fpath);
+                let mut owner: Option<String> = None;
+
+                loop {
+                    if root_set.contains(ancestor.as_str()) {
+                        owner = Some(ancestor.clone());
+                        break;
+                    }
+                    // Strip the last path component and try again.
+                    match ancestor.rfind('/') {
+                        Some(0) => {
+                            // Reached the filesystem root.
+                            if root_set.contains("/") {
+                                owner = Some("/".to_string());
+                            }
+                            break;
+                        }
+                        Some(idx) => ancestor.truncate(idx),
+                        None => break,
+                    }
+                }
+
+                let Some(owner) = owner else { continue };
+
+                let fsize = fsize.max(0) as u64;
+                let agg = aggregates.entry(owner).or_default();
+                agg.total_bytes += fsize;
+                agg.file_count += 1;
+                if let Some(m) = fmod {
+                    agg.max_modified = Some(agg.max_modified.map_or(m, |curr| curr.max(m)));
+                }
+
+                // Classify the file's role. `contains_ci` performs a case-insensitive
+                // substring test without allocating a lowercased copy of the path.
+                if contains_ci(&fpath, "/node_modules/")
+                    || contains_ci(&fpath, "/.venv/")
+                    || contains_ci(&fpath, "/venv/")
+                    || contains_ci(&fpath, "/pods/")
+                    || contains_ci(&fpath, "/.pnpm-store/")
+                {
+                    agg.dep_bytes += fsize;
+                } else if contains_ci(&fpath, "/.next/cache/")
+                    || contains_ci(&fpath, "/.vite/")
+                    || contains_ci(&fpath, "/.turbo/")
+                    || contains_ci(&fpath, "/.parcel-cache/")
+                    || contains_ci(&fpath, "/__pycache__/")
+                    || contains_ci(&fpath, "/.pytest_cache/")
+                    || contains_ci(&fpath, "/.mypy_cache/")
+                    || contains_ci(&fpath, "/.ruff_cache/")
+                    || contains_ci(&fpath, "/.gradle/caches/")
+                {
+                    agg.cache_bytes += fsize;
+                } else if contains_ci(&fpath, "/target/")
+                    || contains_ci(&fpath, "/dist/")
+                    || contains_ci(&fpath, "/build/")
+                    || contains_ci(&fpath, "/.next/")
+                    || contains_ci(&fpath, "/.nuxt/")
+                    || contains_ci(&fpath, "/.output/")
+                    || contains_ci(&fpath, "/cmake-build-debug/")
+                    || contains_ci(&fpath, "/cmake-build-release/")
+                    || contains_ci(&fpath, "/debug/")
+                    || contains_ci(&fpath, "/release/")
+                    || contains_ci(&fpath, "/coverage/")
+                    || contains_ci(&fpath, "/deriveddata/")
+                {
+                    agg.build_bytes += fsize;
+                }
+            }
+        }
+
+        // 3. Persist the per-project results.
         let tx = conn.transaction()?;
         tx.execute(
             "DELETE FROM developer_projects WHERE session_id = ?1;",
@@ -73,87 +219,21 @@ impl DeveloperService {
             [session_id],
         )?;
 
-        // 3. Analyze each discovered project
+        // 4. Analyze each discovered project
         let mut projects = Vec::new();
 
-        for (root_path, file_markers) in project_roots {
+        for (root_path, file_markers) in root_list {
             let ecosystem = Self::detect_ecosystem(&file_markers);
             let name = Self::extract_project_name(&root_path);
             let project_id = Uuid::new_v4().to_string();
 
-            // Query files under this project path prefix
-            let path_prefix = format!("{}/%", root_path.trim_end_matches('/'));
-
-            let mut file_query_stmt = tx.prepare(
-                "SELECT path, size_bytes, modified_at
-                 FROM files
-                 WHERE session_id = ?1
-                   AND (path = ?2 OR path LIKE ?3);",
-            )?;
-
-            let rows = file_query_stmt.query_map(params![session_id, root_path, path_prefix], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)? as u64,
-                    r.get::<_, Option<i64>>(2)?,
-                ))
-            })?;
-
-            let mut dep_bytes: u64 = 0;
-            let mut cache_bytes: u64 = 0;
-            let mut build_bytes: u64 = 0;
-            let mut total_bytes: u64 = 0;
-            let mut file_count: u64 = 0;
-            let mut max_modified: Option<i64> = None;
-
-            for row in rows {
-                let (fpath, fsize, fmod) = row?;
-                let p_lower = fpath.to_lowercase().replace('\\', "/");
-
-                total_bytes += fsize;
-                file_count += 1;
-
-                if let Some(m) = fmod {
-                    max_modified = Some(max_modified.map_or(m, |curr| curr.max(m)));
-                }
-
-                // Check role
-                if p_lower.contains("/node_modules/")
-                    || p_lower.contains("/.venv/")
-                    || p_lower.contains("/venv/")
-                    || p_lower.contains("/pods/")
-                    || p_lower.contains("/.pnpm-store/")
-                {
-                    dep_bytes += fsize;
-                } else if p_lower.contains("/.next/cache/")
-                    || p_lower.contains("/.vite/")
-                    || p_lower.contains("/.turbo/")
-                    || p_lower.contains("/.parcel-cache/")
-                    || p_lower.contains("/__pycache__/")
-                    || p_lower.contains("/.pytest_cache/")
-                    || p_lower.contains("/.mypy_cache/")
-                    || p_lower.contains("/.ruff_cache/")
-                    || p_lower.contains("/.gradle/caches/")
-                {
-                    cache_bytes += fsize;
-                } else if p_lower.contains("/target/")
-                    || p_lower.contains("/dist/")
-                    || p_lower.contains("/build/")
-                    || p_lower.contains("/.next/")
-                    || p_lower.contains("/.nuxt/")
-                    || p_lower.contains("/.output/")
-                    || p_lower.contains("/cmake-build-debug/")
-                    || p_lower.contains("/cmake-build-release/")
-                    || p_lower.contains("/debug/")
-                    || p_lower.contains("/release/")
-                    || p_lower.contains("/coverage/")
-                    || p_lower.contains("/deriveddata/")
-                {
-                    build_bytes += fsize;
-                }
-            }
-
-            drop(file_query_stmt);
+            let agg = aggregates.get(&root_path).cloned().unwrap_or_default();
+            let dep_bytes = agg.dep_bytes;
+            let cache_bytes = agg.cache_bytes;
+            let build_bytes = agg.build_bytes;
+            let total_bytes = agg.total_bytes;
+            let file_count = agg.file_count;
+            let max_modified = agg.max_modified;
 
             let confidence = if file_markers.len() > 1 { 0.98 } else { 0.90 };
 

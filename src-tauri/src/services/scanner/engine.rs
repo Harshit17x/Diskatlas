@@ -259,7 +259,7 @@ impl ScanEngine {
             if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
                 info!("Scan session '{}' cancelled by user", options.session_id);
                 // Perform bottom-up rollup on whatever was scanned so far before flushing
-                Self::rollup_and_flush_directories(&db_pool, &options.session_id, &mut dir_map, options.batch_size)?;
+                Self::rollup_and_flush_directories(&db_pool, &options.session_id, &mut dir_map, options.batch_size, &options.root_path)?;
                 Self::flush_batches(&db_pool, &options.session_id, &mut file_batch, &mut dir_batch, &mut error_batch)?;
                 Self::update_session_status(&db_pool, &options.session_id, ScanStatus::Cancelled, files_scanned, dirs_scanned, bytes_scanned, error_count)?;
                 return Ok(ScanSummary {
@@ -613,7 +613,24 @@ impl ScanEngine {
         Self::flush_batches(&db_pool, &options.session_id, &mut file_batch, &mut empty_dir_batch, &mut error_batch)?;
 
         // Perform bottom-up directory rollup so parent directories reflect true recursive size
-        Self::rollup_and_flush_directories(&db_pool, &options.session_id, &mut dir_map, options.batch_size)?;
+        Self::rollup_and_flush_directories(&db_pool, &options.session_id, &mut dir_map, options.batch_size, &options.root_path)?;
+
+        // Ensure the scan root itself has a directory row.
+        //
+        // The traversal never visits the literal root (on macOS it seeds a set of firmlink
+        // roots), so no `directories` row existed for it. The visualization tree looked up
+        // the root by `path = root_path` and fell back to `scan_sessions.total_bytes` with a
+        // hardcoded file count of 0 — the root tile therefore reported zero files and a size
+        // that did not reconcile with the sum of its children. Writing an explicit root row
+        // (aggregated from the top-level children) makes the root a real, navigable node.
+        Self::ensure_root_directory_row(
+            &db_pool,
+            &options.session_id,
+            &options.root_path,
+            files_scanned,
+            dirs_scanned,
+            bytes_scanned,
+        )?;
 
         // Determine final completion status
         let final_status = if error_count > 0 {
@@ -818,28 +835,27 @@ impl ScanEngine {
             ),
         )?;
 
-        // Automatically aggregate category summaries and create point-in-time snapshot on completion
+        // Automatically aggregate category summaries and create point-in-time snapshot on completion.
+        //
+        // IMPORTANT: this aggregates the canonical `files.category` taxonomy (the 16-category
+        // classifier assigned during the scan) rather than re-deriving categories from the
+        // extension. The previous implementation used `CASE ... END AS category` with
+        // `GROUP BY category`, but SQLite resolves GROUP BY against input columns in
+        // preference to a SELECT-list output alias — so `GROUP BY category` silently bound
+        // to the `files.category` column while the CASE expression was evaluated against an
+        // arbitrary row per group. Combined with `UNIQUE(session_id, category)` and
+        // `INSERT OR REPLACE`, that collapsed every scan's breakdown into one row.
         if status == ScanStatus::Completed || status == ScanStatus::CompletedWithErrors {
             let _ = conn.execute(
                 "INSERT OR REPLACE INTO category_summaries (session_id, category, file_count, total_bytes)
                  SELECT
                      session_id,
-                     CASE
-                         WHEN is_system = 1 THEN 'system'
-                         WHEN extension IN ('rs', 'ts', 'tsx', 'js', 'jsx', 'py', 'go', 'c', 'cpp', 'h', 'hpp', 'java', 'cs', 'swift', 'kt', 'html', 'css', 'scss', 'json', 'yaml', 'yml', 'toml', 'xml', 'sql', 'sh', 'bash', 'zsh', 'bat', 'ps1') THEN 'code'
-                         WHEN extension IN ('pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'md', 'csv', 'tsv', 'rtf', 'epub', 'pages', 'numbers', 'key') THEN 'documents'
-                         WHEN extension IN ('png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'bmp', 'tiff', 'psd', 'ai', 'raw', 'heic') THEN 'images'
-                         WHEN extension IN ('mp4', 'mkv', 'mov', 'avi', 'wmv', 'flv', 'webm', 'm4v', 'mpg', 'mpeg') THEN 'videos'
-                         WHEN extension IN ('mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a', 'wma', 'aiff') THEN 'audio'
-                         WHEN extension IN ('zip', 'tar', 'gz', '7z', 'rar', 'bz2', 'xz', 'iso', 'dmg', 'pkg', 'tgz') THEN 'archives'
-                         WHEN extension IN ('exe', 'dll', 'msi', 'dylib', 'so', 'app', 'bin', 'elf') THEN 'executables'
-                         ELSE 'other'
-                     END AS category,
+                     COALESCE(NULLIF(category, ''), 'unknown') AS category,
                      COUNT(*) as file_count,
                      COALESCE(SUM(size_bytes), 0) as total_bytes
                  FROM files
                  WHERE session_id = ?1
-                 GROUP BY category;",
+                 GROUP BY COALESCE(NULLIF(category, ''), 'unknown');",
                 [session_id],
             );
 
@@ -863,10 +879,25 @@ impl ScanEngine {
         session_id: &str,
         dir_map: &mut std::collections::HashMap<String, RawDirItem>,
         batch_size: usize,
+        root_path: &Path,
     ) -> Result<()> {
         if dir_map.is_empty() {
             return Ok(());
         }
+
+        // Repair orphaned parent links.
+        //
+        // On macOS the scanner seeds a set of firmlink roots (/opt, /usr/local, /Library,
+        // /Applications, /Users/Shared, each /Users/* profile, $HOME) instead of the literal
+        // root. Those seeds record their *real* filesystem parent (e.g. /usr/local's parent is
+        // /usr), but the intermediate parent is never itself visited, so it never gets a row.
+        // The result is a chain that cannot be walked from the root and a subtree that is
+        // invisible no matter how the user navigates.
+        //
+        // Here we (a) re-parent any directory whose parent has no row to the nearest ancestor
+        // that does have one, and (b) synthesize the root row so the tree has a real root.
+        let root_str = root_path.to_string_lossy().to_string();
+        Self::repair_orphaned_parents(dir_map, &root_str);
 
         // Sort descending by path length so deepest paths roll up to their parents first
         let mut dir_paths: Vec<String> = dir_map.keys().cloned().collect();
@@ -895,6 +926,123 @@ impl ScanEngine {
             let mut empty_errors = Vec::new();
             Self::flush_batches(db_pool, session_id, &mut empty_files, &mut chunk_vec, &mut empty_errors)?;
         }
+
+        Ok(())
+    }
+
+    /// Re-parents directories whose parent directory has no row of its own to the nearest
+    /// ancestor that does, so the whole tree remains reachable from the root.
+    fn repair_orphaned_parents(
+        dir_map: &mut std::collections::HashMap<String, RawDirItem>,
+        root_path: &str,
+    ) {
+        // Collect the set of known paths once.
+        let known: std::collections::HashSet<String> = dir_map.keys().cloned().collect();
+
+        let orphans: Vec<(String, String)> = dir_map
+            .iter()
+            .filter_map(|(path, item)| {
+                let parent = item.parent_path.clone()?;
+                if parent.is_empty() || parent == *path {
+                    return None;
+                }
+                if known.contains(&parent) {
+                    return None;
+                }
+                Some((path.clone(), parent))
+            })
+            .collect();
+
+        for (path, parent) in orphans {
+            // Walk up the ancestor chain until we find one that exists as a row.
+            let mut candidate = Path::new(&parent);
+            let mut resolved: Option<String> = None;
+            loop {
+                let cand_str = candidate.to_string_lossy().to_string();
+                if cand_str.is_empty() || cand_str == "/" {
+                    break;
+                }
+                if known.contains(&cand_str) {
+                    resolved = Some(cand_str);
+                    break;
+                }
+                match candidate.parent() {
+                    Some(p) => candidate = p,
+                    None => break,
+                }
+            }
+
+            // Fall back to the scan root when no ancestor has a row.
+            let new_parent = resolved.or_else(|| {
+                if root_path.is_empty() || root_path == "/" {
+                    None
+                } else {
+                    Some(root_path.to_string())
+                }
+            });
+
+            if let Some(item) = dir_map.get_mut(&path) {
+                item.parent_path = new_parent;
+            }
+        }
+    }
+
+    /// Writes an explicit `directories` row for the scan root so the visualization tree has
+    /// a real root node with an accurate file count and a size that reconciles with the sum
+    /// of its children.
+    ///
+    /// The traversal never visits the literal root (on macOS it seeds a set of firmlink
+    /// roots such as /Users, /Applications, /Library, /opt), so no row existed for it.
+    fn ensure_root_directory_row(
+        db_pool: &DbPool,
+        session_id: &str,
+        root_path: &Path,
+        total_files: u64,
+        total_dirs: u64,
+        total_bytes: u64,
+    ) -> Result<()> {
+        let root_str = root_path.to_string_lossy().to_string();
+        if root_str.is_empty() {
+            return Ok(());
+        }
+
+        let conn_arc = db_pool.conn();
+        let conn = conn_arc.lock().unwrap();
+
+        let (created_at, modified_at) = match fs::metadata(root_path) {
+            Ok(m) => Self::get_timestamps(&m),
+            Err(_) => (None, None),
+        };
+
+        let root_name = root_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| root_str.clone());
+
+        // The root's own metrics come from the session totals, which represent everything the
+        // scan actually observed (including the seeded roots).
+        conn.execute(
+            "INSERT INTO directories (
+                session_id, path, name, parent_path, file_count, dir_count,
+                total_size_bytes, created_at, modified_at, is_hidden, is_system
+             ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, 0, 1)
+             ON CONFLICT(session_id, path) DO UPDATE SET
+                file_count = excluded.file_count,
+                dir_count = excluded.dir_count,
+                total_size_bytes = excluded.total_size_bytes,
+                created_at = excluded.created_at,
+                modified_at = excluded.modified_at",
+            rusqlite::params![
+                session_id,
+                root_str,
+                root_name,
+                total_files as i64,
+                total_dirs as i64,
+                total_bytes as i64,
+                created_at,
+                modified_at,
+            ],
+        )?;
 
         Ok(())
     }

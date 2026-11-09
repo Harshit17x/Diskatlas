@@ -49,6 +49,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0008_cleanup_audit_history",
         sql: include_str!("../../migrations/0008_cleanup_audit_history.sql"),
     },
+    Migration {
+        version: 9,
+        name: "0009_integrity_and_repair",
+        sql: include_str!("../../migrations/0009_integrity_and_repair.sql"),
+    },
 ];
 
 pub struct Migrator;
@@ -150,7 +155,7 @@ mod tests {
     fn test_migrations_apply_cleanly_on_empty_db() {
         let mut conn = Connection::open_in_memory().unwrap();
         let version = Migrator::run(&mut conn).unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
 
         // Verify tables were created
         let tables_count: i64 = conn
