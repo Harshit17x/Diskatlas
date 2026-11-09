@@ -181,4 +181,66 @@ mod tests {
         manager.cancel_scan(&session_id).unwrap();
         let _ = fs::remove_dir_all(&temp_base);
     }
+
+    #[test]
+    fn test_category_summaries_alias_collision_regression() {
+        let test_run_id = Uuid::new_v4().to_string();
+        let temp_base = std::env::temp_dir().join(format!("diskatlas_cat_{}", test_run_id));
+        fs::create_dir_all(&temp_base).unwrap();
+        let db_path = temp_base.join("test_cat.db");
+        let db_pool = DbPool::new(&db_path).unwrap();
+        let session_id = format!("test-session-{}", test_run_id);
+        {
+            let conn_arc = db_pool.conn();
+            let mut conn = conn_arc.lock().unwrap();
+            Migrator::run(&mut conn).unwrap();
+            conn.execute(
+                "INSERT INTO drives (id, label, mount_point, filesystem, total_bytes, available_bytes)
+                 VALUES ('TEST_DRIVE', 'Test Drive', '/test', 'apfs', 10000000, 5000000);",
+                (),
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO scan_sessions (id, drive_id, root_path, status)
+                 VALUES (?1, 'TEST_DRIVE', '/test', 'running');",
+                [&session_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO files (session_id, path, name, extension, parent_path, size_bytes, category)
+                 VALUES
+                 (?1, '/test/a.rs', 'a.rs', 'rs', '/test', 100, 'classifier_code'),
+                 (?1, '/test/b.rs', 'b.rs', 'rs', '/test', 200, 'classifier_other'),
+                 (?1, '/test/c.png', 'c.png', 'png', '/test', 300, 'classifier_other');",
+                [&session_id],
+            )
+            .unwrap();
+        }
+
+        ScanEngine::update_session_status(
+            &db_pool,
+            &session_id,
+            ScanStatus::Completed,
+            3,
+            1,
+            600,
+            0,
+        )
+        .unwrap();
+
+        {
+            let conn_arc = db_pool.conn();
+            let conn = conn_arc.lock().unwrap();
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM category_summaries WHERE session_id = ?1;",
+                    [&session_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 2);
+        }
+
+        let _ = fs::remove_dir_all(&temp_base);
+    }
 }
