@@ -805,7 +805,7 @@ impl ScanEngine {
         Ok(())
     }
 
-    fn update_session_status(
+    pub(crate) fn update_session_status(
         db_pool: &DbPool,
         session_id: &str,
         status: ScanStatus,
@@ -835,27 +835,34 @@ impl ScanEngine {
             ),
         )?;
 
-        // Automatically aggregate category summaries and create point-in-time snapshot on completion.
-        //
-        // IMPORTANT: this aggregates the canonical `files.category` taxonomy (the 16-category
-        // classifier assigned during the scan) rather than re-deriving categories from the
-        // extension. The previous implementation used `CASE ... END AS category` with
-        // `GROUP BY category`, but SQLite resolves GROUP BY against input columns in
-        // preference to a SELECT-list output alias — so `GROUP BY category` silently bound
-        // to the `files.category` column while the CASE expression was evaluated against an
-        // arbitrary row per group. Combined with `UNIQUE(session_id, category)` and
-        // `INSERT OR REPLACE`, that collapsed every scan's breakdown into one row.
+        // Automatically aggregate category summaries and create point-in-time snapshot on completion
         if status == ScanStatus::Completed || status == ScanStatus::CompletedWithErrors {
             let _ = conn.execute(
                 "INSERT OR REPLACE INTO category_summaries (session_id, category, file_count, total_bytes)
                  SELECT
                      session_id,
-                     COALESCE(NULLIF(category, ''), 'unknown') AS category,
+                     ext_category AS category,
                      COUNT(*) as file_count,
                      COALESCE(SUM(size_bytes), 0) as total_bytes
-                 FROM files
-                 WHERE session_id = ?1
-                 GROUP BY COALESCE(NULLIF(category, ''), 'unknown');",
+                 FROM (
+                     SELECT
+                         session_id,
+                         size_bytes,
+                         CASE
+                             WHEN is_system = 1 THEN 'system'
+                             WHEN extension IN ('rs', 'ts', 'tsx', 'js', 'jsx', 'py', 'go', 'c', 'cpp', 'h', 'hpp', 'java', 'cs', 'swift', 'kt', 'html', 'css', 'scss', 'json', 'yaml', 'yml', 'toml', 'xml', 'sql', 'sh', 'bash', 'zsh', 'bat', 'ps1') THEN 'code'
+                             WHEN extension IN ('pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'md', 'csv', 'tsv', 'rtf', 'epub', 'pages', 'numbers', 'key') THEN 'documents'
+                             WHEN extension IN ('png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'bmp', 'tiff', 'psd', 'ai', 'raw', 'heic') THEN 'images'
+                             WHEN extension IN ('mp4', 'mkv', 'mov', 'avi', 'wmv', 'flv', 'webm', 'm4v', 'mpg', 'mpeg') THEN 'videos'
+                             WHEN extension IN ('mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a', 'wma', 'aiff') THEN 'audio'
+                             WHEN extension IN ('zip', 'tar', 'gz', '7z', 'rar', 'bz2', 'xz', 'iso', 'dmg', 'pkg', 'tgz') THEN 'archives'
+                             WHEN extension IN ('exe', 'dll', 'msi', 'dylib', 'so', 'app', 'bin', 'elf') THEN 'executables'
+                             ELSE 'other'
+                         END AS ext_category
+                     FROM files
+                     WHERE session_id = ?1
+                 )
+                 GROUP BY ext_category;",
                 [session_id],
             );
 

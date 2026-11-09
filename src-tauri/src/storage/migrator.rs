@@ -51,8 +51,13 @@ pub const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 9,
-        name: "0009_integrity_and_repair",
-        sql: include_str!("../../migrations/0009_integrity_and_repair.sql"),
+        name: "0009_rebuild_category_summaries",
+        sql: include_str!("../../migrations/0009_rebuild_category_summaries.sql"),
+    },
+    Migration {
+        version: 10,
+        name: "0010_integrity_and_repair",
+        sql: include_str!("../../migrations/0010_integrity_and_repair.sql"),
     },
 ];
 
@@ -155,7 +160,7 @@ mod tests {
     fn test_migrations_apply_cleanly_on_empty_db() {
         let mut conn = Connection::open_in_memory().unwrap();
         let version = Migrator::run(&mut conn).unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
 
         // Verify tables were created
         let tables_count: i64 = conn

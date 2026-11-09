@@ -1,4 +1,4 @@
--- DiskAtlas Database Migration: 0009_integrity_and_repair.sql
+-- DiskAtlas Database Migration: 0010_integrity_and_repair.sql
 --
 -- Addresses three integrity problems found during the July 2026 codebase review:
 --
