@@ -1,17 +1,64 @@
 import { create } from 'zustand';
 import { safeInvoke } from '../utils/tauri';
-import { useScanStore } from './scanStore';
-import { useHistoryStore } from './historyStore';
+import { resolvePreferredSessionId } from '../utils/session';
 import type {
   HierarchicalNode,
   HierarchicalQuery,
   StorageAnalyticsData,
 } from '../types/bindings';
 
+function buildBreadcrumbs(activePath: string, rootAnchor: string | null): string[] {
+  const isWindows = /^[A-Za-z]:/.test(activePath) || activePath.includes('\\');
+  const sep = isWindows ? '\\' : '/';
+  const normActive = activePath.replace(/[\\/]+$/, '') || (isWindows ? activePath.slice(0, 3) : '/');
+  const normAnchor = rootAnchor
+    ? rootAnchor.replace(/[\\/]+$/, '') || (isWindows ? rootAnchor.slice(0, 3) : '/')
+    : null;
+
+  if (normAnchor && (normActive === normAnchor || normActive.startsWith(normAnchor + sep) || normAnchor === '/')) {
+    if (normActive === normAnchor) {
+      return [rootAnchor!];
+    }
+    const baseParts = normAnchor === '/' ? [] : normAnchor.split(/[\\/]/).filter(Boolean);
+    const activeParts = normActive.split(/[\\/]/).filter(Boolean);
+    const crumbs: string[] = [rootAnchor!];
+    let current = normAnchor === '/' ? '' : normAnchor;
+    for (let i = baseParts.length; i < activeParts.length; i++) {
+      current = current ? `${current}${sep}${activeParts[i]}` : `${sep}${activeParts[i]}`;
+      crumbs.push(current);
+    }
+    return crumbs;
+  }
+
+  // Standalone full-path reconstruction (supports Unix `/` and Windows `C:\`)
+  const parts = activePath.split(/[\\/]/).filter(Boolean);
+  if (parts.length === 0) return [activePath];
+  if (isWindows) {
+    const driveRoot = `${parts[0]}\\`;
+    const crumbs = [driveRoot];
+    let cur = parts[0];
+    for (let i = 1; i < parts.length; i++) {
+      cur = `${cur}\\${parts[i]}`;
+      crumbs.push(cur);
+    }
+    return crumbs;
+  }
+
+  const crumbs = ['/'];
+  let cur = '';
+  for (const part of parts) {
+    cur += `/${part}`;
+    crumbs.push(cur);
+  }
+  return crumbs;
+}
+
 interface VisualizationState {
   // Tree state for Treemap & Sunburst
   tree: HierarchicalNode | null;
   isLoadingTree: boolean;
+  currentSessionId: string | null;
+  sessionRootPath: string | null;
   currentRootPath: string | null;
   breadcrumbs: string[];
   maxDepth: number;
@@ -37,6 +84,8 @@ interface VisualizationState {
 export const useVisualizationStore = create<VisualizationState>((set, get) => ({
   tree: null,
   isLoadingTree: false,
+  currentSessionId: null,
+  sessionRootPath: null,
   currentRootPath: null,
   breadcrumbs: [],
   maxDepth: 3,
@@ -47,21 +96,15 @@ export const useVisualizationStore = create<VisualizationState>((set, get) => ({
 
   setMaxDepth: (depth) => {
     set({ maxDepth: depth });
-    get().fetchTree(undefined, get().currentRootPath || undefined, depth);
+    get().fetchTree(
+      get().currentSessionId || undefined,
+      get().currentRootPath || undefined,
+      depth
+    );
   },
 
   fetchTree: async (sessionId, rootPath, maxDepthOverride) => {
-    let sid = sessionId;
-    if (!sid) {
-      sid = useScanStore.getState().activeSessionId || useScanStore.getState().summary?.sessionId;
-    }
-    if (!sid) {
-      const recent = useHistoryStore.getState().sessionsPage?.items[0];
-      if (recent) {
-        sid = recent.id;
-      }
-    }
-
+    const sid = resolvePreferredSessionId(sessionId);
     const depth = maxDepthOverride || get().maxDepth;
     set({ isLoadingTree: true, error: null });
 
@@ -75,24 +118,15 @@ export const useVisualizationStore = create<VisualizationState>((set, get) => ({
 
     if (res.ok) {
       const activePath = res.data.path;
-      // Reconstruct breadcrumbs from path
-      const parts = activePath
-        .replace(/\\/g, '/')
-        .split('/')
-        .filter(Boolean);
-
-      const crumbs: string[] = [];
-      let accum = activePath.startsWith('/') ? '' : '';
-      for (const part of parts) {
-        accum += (accum === '' && !activePath.startsWith('/') ? '' : '/') + part;
-        crumbs.push(accum);
-      }
-      if (crumbs.length === 0) {
-        crumbs.push(activePath);
-      }
+      const resolvedSid = res.data.sessionId || sid || null;
+      const sessionChanged = resolvedSid !== get().currentSessionId;
+      const rootAnchor = !rootPath || sessionChanged ? activePath : get().sessionRootPath || activePath;
+      const crumbs = buildBreadcrumbs(activePath, rootAnchor);
 
       set({
         tree: res.data,
+        currentSessionId: resolvedSid,
+        sessionRootPath: rootAnchor,
         currentRootPath: activePath,
         breadcrumbs: crumbs,
         isLoadingTree: false,
@@ -103,38 +137,29 @@ export const useVisualizationStore = create<VisualizationState>((set, get) => ({
   },
 
   drillDown: async (path) => {
-    await get().fetchTree(undefined, path);
+    await get().fetchTree(get().currentSessionId || undefined, path);
   },
 
   navigateBreadcrumb: async (path) => {
-    await get().fetchTree(undefined, path);
+    await get().fetchTree(get().currentSessionId || undefined, path);
   },
 
   navigateUp: async () => {
-    const { breadcrumbs } = get();
+    const { breadcrumbs, currentSessionId } = get();
     if (breadcrumbs.length > 1) {
       const parentPath = breadcrumbs[breadcrumbs.length - 2];
-      await get().fetchTree(undefined, parentPath);
+      await get().fetchTree(currentSessionId || undefined, parentPath);
     } else {
       await get().resetDrilldown();
     }
   },
 
   resetDrilldown: async () => {
-    await get().fetchTree(undefined, undefined);
+    await get().fetchTree(get().currentSessionId || undefined, undefined);
   },
 
   fetchAnalytics: async (sessionId) => {
-    let sid = sessionId;
-    if (!sid) {
-      sid = useScanStore.getState().activeSessionId || useScanStore.getState().summary?.sessionId;
-    }
-    if (!sid) {
-      const recent = useHistoryStore.getState().sessionsPage?.items[0];
-      if (recent) {
-        sid = recent.id;
-      }
-    }
+    const sid = resolvePreferredSessionId(sessionId);
 
     set({ isLoadingAnalytics: true, error: null });
     const res = await safeInvoke<StorageAnalyticsData>('get_storage_analytics', {

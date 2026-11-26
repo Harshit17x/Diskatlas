@@ -26,6 +26,20 @@ impl ScanStatus {
             ScanStatus::Interrupted => "interrupted",
         }
     }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "queued" => ScanStatus::Queued,
+            "running" => ScanStatus::Running,
+            "paused" => ScanStatus::Paused,
+            "completed" => ScanStatus::Completed,
+            "completed_with_errors" | "completedWithErrors" => ScanStatus::CompletedWithErrors,
+            "cancelled" => ScanStatus::Cancelled,
+            "failed" => ScanStatus::Failed,
+            "interrupted" => ScanStatus::Interrupted,
+            _ => ScanStatus::Failed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,7 +1,6 @@
 import { create } from 'zustand';
 import { safeInvoke } from '../utils/tauri';
-import { useScanStore } from './scanStore';
-import { useHistoryStore } from './historyStore';
+import { resolvePreferredSessionId } from '../utils/session';
 import type {
   StorageIntelligenceProfile,
   RecommendationsResponse,
@@ -23,7 +22,7 @@ interface IntelligenceState {
 
   error: string | null;
 
-  fetchProfile: (sessionId?: string | null) => Promise<void>;
+  fetchProfile: (sessionId?: string | null, forceRefresh?: boolean) => Promise<void>;
   fetchRecommendations: (sessionId?: string | null) => Promise<void>;
 }
 
@@ -52,43 +51,27 @@ export const useIntelligenceStore = create<IntelligenceState>((set, get) => ({
 
   error: null,
 
-  fetchProfile: async (sessionId) => {
-    let sid: string | undefined = sessionId || get().selectedSessionId || undefined;
-    if (!sid) {
-      sid = useScanStore.getState().activeSessionId || useScanStore.getState().summary?.sessionId || undefined;
-    }
-    if (!sid) {
-      const recent = useHistoryStore.getState().sessionsPage?.items[0];
-      if (recent) {
-        sid = recent.id;
-      }
-    }
+  fetchProfile: async (sessionId, forceRefresh = false) => {
+    const sid = resolvePreferredSessionId(sessionId ?? get().selectedSessionId);
 
     set({ isLoadingProfile: true, error: null });
     const res = await safeInvoke<StorageIntelligenceProfile>('get_storage_intelligence', {
       sessionId: sid || null,
+      forceRefresh,
     });
 
     if (res.ok) {
       set({ profile: res.data, isLoadingProfile: false });
-      // Automatically fetch initial recommendations for this profile
-      get().fetchRecommendations(sid);
+      get().fetchRecommendations(res.data.sessionId);
     } else {
       set({ error: res.error.message, isLoadingProfile: false });
     }
   },
 
   fetchRecommendations: async (sessionId) => {
-    let sid: string | undefined = sessionId || get().selectedSessionId || get().profile?.sessionId || undefined;
-    if (!sid) {
-      sid = useScanStore.getState().activeSessionId || useScanStore.getState().summary?.sessionId || undefined;
-    }
-    if (!sid) {
-      const recent = useHistoryStore.getState().sessionsPage?.items[0];
-      if (recent) {
-        sid = recent.id;
-      }
-    }
+    const sid = resolvePreferredSessionId(
+      sessionId ?? get().selectedSessionId ?? get().profile?.sessionId
+    );
 
     set({ isLoadingRecommendations: true, error: null });
     const res = await safeInvoke<RecommendationsResponse>('get_storage_recommendations', {

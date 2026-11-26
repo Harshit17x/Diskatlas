@@ -48,30 +48,48 @@ export const DashboardView: React.FC = () => {
 
   // Dynamic category breakdown: use real SQLite-indexed scan analytics if available,
   // otherwise calculate from live detected drive storage
+  const CATEGORY_META: Record<string, { label: string; color: string }> = {
+    documents: { label: 'Documents', color: '#f97316' },
+    applications: { label: 'Applications', color: '#f59e0b' },
+    developer: { label: 'Developer', color: '#3b82f6' },
+    os: { label: 'OS & System', color: '#64748b' },
+    videos: { label: 'Videos', color: '#ec4899' },
+    images: { label: 'Images', color: '#06b6d4' },
+    audio: { label: 'Audio', color: '#10b981' },
+    temporary: { label: 'Temporary', color: '#ef4444' },
+    archives: { label: 'Archives', color: '#eab308' },
+    browsers: { label: 'Browsers', color: '#a855f7' },
+    cloud: { label: 'Cloud Sync', color: '#38bdf8' },
+    gaming: { label: 'Gaming', color: '#f43f5e' },
+    backups: { label: 'Backups', color: '#14b8a6' },
+    vm_emulators: { label: 'VMs', color: '#6366f1' },
+    hidden: { label: 'Hidden', color: '#78716c' },
+    unknown: { label: 'Other / Unknown', color: '#8b5cf6' },
+  };
+
   const hasScannedData = Boolean(analyticsData?.categoryDistribution?.length);
-  const categorySegments = hasScannedData
-    ? analyticsData!.categoryDistribution.map((c) => ({
-        name: c.category,
-        bytes: c.totalBytes,
-        percent: totalCapacity > 0 ? (c.totalBytes / totalCapacity) * 100 : 0,
-        color:
-          c.category === 'Documents'
-            ? '#f97316'
-            : c.category === 'Applications'
-            ? '#f59e0b'
-            : c.category === 'Developer'
-            ? '#3b82f6'
-            : c.category === 'System' || c.category === 'System Data'
-            ? '#64748b'
-            : c.category === 'Media'
-            ? '#ec4899'
-            : '#8b5cf6',
-      }))
+  const rawSegments = hasScannedData
+    ? analyticsData!.categoryDistribution
+        .filter((c) => c.totalBytes > 0)
+        .map((c) => {
+          const meta = CATEGORY_META[c.category.toLowerCase()];
+          const denom = totalCapacity > 0 ? totalCapacity : Math.max(analyticsData!.totalBytes, 1);
+          return {
+            name: meta?.label || c.category.replace(/_/g, ' '),
+            bytes: c.totalBytes,
+            percent: (c.totalBytes / denom) * 100,
+            color: meta?.color || '#8b5cf6',
+          };
+        })
     : totalCapacity > 0
-    ? [
-        { name: 'Used Storage', bytes: totalUsed, percent: overallPercent, color: '#3b82f6' },
-      ]
+    ? [{ name: 'Used Storage', bytes: totalUsed, percent: overallPercent, color: '#3b82f6' }]
     : [];
+
+  const freePercent = totalCapacity > 0 && totalAvailable > 0 ? (totalAvailable / totalCapacity) * 100 : 0;
+  const usedSegmentsTotal = rawSegments.reduce((sum, s) => sum + s.percent, 0);
+  const maxUsedBudget = Math.max(0, 100 - freePercent);
+  const segScale = usedSegmentsTotal > maxUsedBudget && usedSegmentsTotal > 0 ? maxUsedBudget / usedSegmentsTotal : 1;
+  const categorySegments = rawSegments.map((s) => ({ ...s, barPercent: s.percent * segScale }));
 
   const handleQuickScan = () => {
     if (primaryDrive) {
@@ -190,7 +208,7 @@ export const DashboardView: React.FC = () => {
               {progress.currentFile && (
                 <span className="text-accent flex items-center gap-1 font-medium">
                   <span className="w-1.5 h-1.5 rounded-full bg-accent animate-ping" />
-                  Tracking: {progress.currentFile.split('/').pop() || progress.currentFile}
+                  Tracking: {progress.currentFile.split(/[/\\]/).pop() || progress.currentFile}
                 </span>
               )}
             </div>
@@ -299,16 +317,16 @@ export const DashboardView: React.FC = () => {
           {categorySegments.map((seg) => (
             <div
               key={seg.name}
-              style={{ width: `${Math.max(seg.percent, 1)}%`, backgroundColor: seg.color }}
+              style={{ width: `${seg.barPercent}%`, backgroundColor: seg.color }}
               title={`${seg.name}: ${formatBytes(seg.bytes)} (${seg.percent.toFixed(1)}%)`}
-              className="h-full transition-all duration-300 hover:brightness-110 cursor-pointer"
+              className="h-full min-w-[2px] transition-all duration-300 hover:brightness-110 cursor-pointer"
               onClick={() => setActiveTab('analysis')}
             />
           ))}
           {/* Available Free Segment */}
           {totalCapacity > 0 && totalAvailable > 0 && (
             <div
-              style={{ width: `${(totalAvailable / totalCapacity) * 100}%` }}
+              style={{ width: `${freePercent}%` }}
               title={`Free Space: ${formatBytes(totalAvailable)}`}
               className="h-full bg-emerald-500/30 hover:bg-emerald-500/40 transition-colors"
             />

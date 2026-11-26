@@ -90,11 +90,12 @@ export const StorageAnalysisView: React.FC = () => {
   }, [activeTab, activeProfile?.sessionId, fetchLargeFiles, fetchUnknownStorage]);
 
   const handleSelectSession = (sid: string) => {
-    fetchAnalysis(sid);
+    selectCategory(null);
+    fetchAnalysis(sid || undefined);
     if (activeTab === 'large_files') {
-      fetchLargeFiles(sid);
+      fetchLargeFiles(sid || undefined);
     } else if (activeTab === 'unknown') {
-      fetchUnknownStorage(sid);
+      fetchUnknownStorage(sid || undefined);
     }
   };
 
@@ -366,8 +367,9 @@ export const StorageAnalysisView: React.FC = () => {
           <select
             value={activeProfile?.sessionId || ''}
             onChange={(e) => handleSelectSession(e.target.value)}
-            className="bg-[#15171B] border border-border rounded px-2.5 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
+            className="bg-panel border border-border rounded px-2.5 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
           >
+            <option value="">Latest Completed Scan</option>
             {sessionsPage?.items.map((s) => (
               <option key={s.id} value={s.id}>
                 Session {s.id.slice(0, 8)} ({s.driveId} • {formatBytes(s.totalBytes)})
@@ -400,7 +402,7 @@ export const StorageAnalysisView: React.FC = () => {
       </div>
 
       {/* 2. Safety & Engineering Principles Alert Banner */}
-      <div className="p-3 bg-[#131518] border border-border rounded flex items-start gap-2.5 text-xs text-secondary">
+      <div className="p-3 bg-panel border border-border rounded flex items-start gap-2.5 text-xs text-secondary">
         <Info className="w-4 h-4 text-accent shrink-0 mt-0.5" />
         <div className="space-y-0.5 text-[11px]">
           <span className="font-semibold text-primary block">Deterministic Classification Principles:</span>
@@ -513,7 +515,7 @@ export const StorageAnalysisView: React.FC = () => {
                         </div>
 
                         {/* Progress Bar */}
-                        <div className="w-full bg-[#131518] h-1.5 rounded overflow-hidden mt-2 border border-border/50">
+                        <div className="w-full bg-elevated h-1.5 rounded overflow-hidden mt-2 border border-border/50">
                           <div
                             className="bg-accent h-full rounded transition-all"
                             style={{ width: `${Math.min(cat.percentageBytes, 100)}%` }}
@@ -564,7 +566,7 @@ export const StorageAnalysisView: React.FC = () => {
                     className={`px-2 py-0.5 rounded text-[11px] font-mono transition-colors ${
                       largeFilesQuery.minSizeBytes === s.bytes
                         ? 'bg-accent text-white font-medium'
-                        : 'bg-elevated text-secondary hover:text-primary hover:bg-[#282D35]'
+                        : 'bg-elevated text-secondary hover:text-primary hover:bg-elevated/80'
                     }`}
                   >
                     {s.label}
@@ -579,7 +581,7 @@ export const StorageAnalysisView: React.FC = () => {
                   value={largeFilesQuery.extension || ''}
                   onChange={(e) => setLargeFilesQuery({ extension: e.target.value, page: 1 })}
                   onKeyDown={(e) => e.key === 'Enter' && fetchLargeFiles(activeProfile?.sessionId)}
-                  className="bg-[#15171B] border border-border rounded px-2 py-1 text-xs text-primary font-mono placeholder-muted focus:outline-none focus:border-accent w-28"
+                  className="bg-panel border border-border rounded px-2 py-1 text-xs text-primary font-mono placeholder-muted focus:outline-none focus:border-accent w-28"
                 />
 
                 <select
@@ -588,7 +590,7 @@ export const StorageAnalysisView: React.FC = () => {
                     setLargeFilesQuery({ sortBy: e.target.value as any, page: 1 });
                     fetchLargeFiles(activeProfile?.sessionId);
                   }}
-                  className="bg-[#15171B] border border-border rounded px-2 py-1 text-xs text-primary font-mono focus:outline-none focus:border-accent"
+                  className="bg-panel border border-border rounded px-2 py-1 text-xs text-primary font-mono focus:outline-none focus:border-accent"
                 >
                   <option value="size_desc">Largest First</option>
                   <option value="size_asc">Smallest First</option>
@@ -785,7 +787,7 @@ export const StorageAnalysisView: React.FC = () => {
 
             <div className="border border-border rounded overflow-hidden">
               <table className="w-full text-left text-xs">
-                <thead className="bg-[#121316] text-muted border-b border-border">
+                <thead className="bg-elevated text-muted border-b border-border">
                   <tr>
                     <th className="px-3 py-2">Pattern / Subpath</th>
                     <th className="px-3 py-2">Target Category</th>
@@ -859,7 +861,7 @@ export const StorageAnalysisView: React.FC = () => {
               value={overridePattern}
               onChange={(e) => setOverridePattern(e.target.value)}
               placeholder="e.g. /my-custom-builds or D:\Databases"
-              className="w-full bg-[#131518] border border-border rounded px-3 py-2 text-xs text-primary focus:outline-none focus:border-accent font-mono"
+              className="w-full bg-elevated border border-border rounded px-3 py-2 text-xs text-primary focus:outline-none focus:border-accent font-mono"
             />
           </div>
 
@@ -868,7 +870,7 @@ export const StorageAnalysisView: React.FC = () => {
             <select
               value={overrideCategory}
               onChange={(e) => setOverrideCategory(e.target.value)}
-              className="w-full bg-[#131518] border border-border rounded px-3 py-2 text-xs text-primary focus:outline-none focus:border-accent"
+              className="w-full bg-elevated border border-border rounded px-3 py-2 text-xs text-primary focus:outline-none focus:border-accent"
             >
               <option value="os">Operating System</option>
               <option value="applications">Applications</option>
@@ -896,7 +898,7 @@ export const StorageAnalysisView: React.FC = () => {
               value={overrideSubcategory}
               onChange={(e) => setOverrideSubcategory(e.target.value)}
               placeholder="e.g. Experimental Models"
-              className="w-full bg-[#131518] border border-border rounded px-3 py-2 text-xs text-primary focus:outline-none focus:border-accent font-sans"
+              className="w-full bg-elevated border border-border rounded px-3 py-2 text-xs text-primary focus:outline-none focus:border-accent font-sans"
             />
           </div>
         </div>

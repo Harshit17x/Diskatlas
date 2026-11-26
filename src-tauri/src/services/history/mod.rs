@@ -22,132 +22,60 @@ impl HistoryService {
         drive_id: Option<String>,
         status: Option<String>,
     ) -> Result<ScanSessionPage> {
-        let conn_arc = db_pool.conn();
-        let conn = conn_arc.lock().unwrap();
+        db_pool.with_read_conn(|conn| {
+            let mut count_query = "SELECT COUNT(*) FROM scan_sessions s WHERE 1=1".to_string();
+            let mut data_query = "SELECT
+                s.id, s.drive_id, d.label, s.root_path, s.status,
+                s.total_files, s.total_directories, s.total_bytes, s.error_count,
+                s.started_at, s.completed_at
+                FROM scan_sessions s
+                LEFT JOIN drives d ON s.drive_id = d.id
+                WHERE 1=1".to_string();
 
-        let mut count_query = "SELECT COUNT(*) FROM scan_sessions s WHERE 1=1".to_string();
-        let mut data_query = "SELECT
-            s.id, s.drive_id, d.label, s.root_path, s.status,
-            s.total_files, s.total_directories, s.total_bytes, s.error_count,
-            s.started_at, s.completed_at
-            FROM scan_sessions s
-            LEFT JOIN drives d ON s.drive_id = d.id
-            WHERE 1=1".to_string();
+            let mut filter_params: Vec<String> = Vec::new();
 
-        let mut filter_params: Vec<String> = Vec::new();
-
-        if let Some(did) = drive_id {
-            if !did.trim().is_empty() {
-                count_query.push_str(" AND s.drive_id = ?");
-                data_query.push_str(" AND s.drive_id = ?");
-                filter_params.push(did);
+            if let Some(did) = drive_id {
+                if !did.trim().is_empty() {
+                    count_query.push_str(" AND s.drive_id = ?");
+                    data_query.push_str(" AND s.drive_id = ?");
+                    filter_params.push(did);
+                }
             }
-        }
 
-        if let Some(st) = status {
-            if !st.trim().is_empty() {
-                count_query.push_str(" AND s.status = ?");
-                data_query.push_str(" AND s.status = ?");
-                filter_params.push(st);
+            if let Some(st) = status {
+                if !st.trim().is_empty() {
+                    count_query.push_str(" AND s.status = ?");
+                    data_query.push_str(" AND s.status = ?");
+                    filter_params.push(st);
+                }
             }
-        }
 
-        // Count total matching records
-        let mut count_stmt = conn.prepare(&count_query)?;
-        let count_params = rusqlite::params_from_iter(filter_params.iter());
-        let total_count: u64 = count_stmt.query_row(count_params, |r| r.get(0))?;
+            // Count total matching records
+            let mut count_stmt = conn.prepare(&count_query)?;
+            let count_params = rusqlite::params_from_iter(filter_params.iter());
+            let total_count: u64 = count_stmt.query_row(count_params, |r| r.get(0))?;
 
-        // Order and paginate
-        data_query.push_str(" ORDER BY s.started_at DESC LIMIT ? OFFSET ?;");
-        let limit = page_size.clamp(1, 100);
-        let offset = page.saturating_sub(1) * limit;
+            // Order and paginate
+            data_query.push_str(" ORDER BY s.started_at DESC LIMIT ? OFFSET ?;");
+            let limit = page_size.clamp(1, 100);
+            let offset = page.saturating_sub(1) * limit;
 
-        let mut data_stmt = conn.prepare(&data_query)?;
-        let mut query_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        for p in &filter_params {
-            query_params.push(Box::new(p.clone()));
-        }
-        query_params.push(Box::new(limit as i64));
-        query_params.push(Box::new(offset as i64));
+            let mut data_stmt = conn.prepare(&data_query)?;
+            let mut query_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            for p in &filter_params {
+                query_params.push(Box::new(p.clone()));
+            }
+            query_params.push(Box::new(limit as i64));
+            query_params.push(Box::new(offset as i64));
 
-        let rows = data_stmt.query_map(
-            rusqlite::params_from_iter(query_params.iter().map(|b| b.as_ref())),
-            |row| {
-                let status_str: String = row.get(4)?;
-                let status = match status_str.as_str() {
-                    "running" => ScanStatus::Running,
-                    "paused" => ScanStatus::Paused,
-                    "completed" => ScanStatus::Completed,
-                    "completed_with_errors" => ScanStatus::CompletedWithErrors,
-                    "cancelled" => ScanStatus::Cancelled,
-                    "failed" => ScanStatus::Failed,
-                    "interrupted" => ScanStatus::Interrupted,
-                    _ => ScanStatus::Queued,
-                };
-
-                let started_at: String = row.get(9)?;
-                let completed_at: Option<String> = row.get(10)?;
-
-                Ok(ScanSessionRecord {
-                    id: row.get(0)?,
-                    drive_id: row.get(1)?,
-                    drive_label: row.get(2)?,
-                    root_path: row.get(3)?,
-                    status,
-                    total_files: row.get::<_, i64>(5)? as u64,
-                    total_directories: row.get::<_, i64>(6)? as u64,
-                    total_bytes: row.get::<_, i64>(7)? as u64,
-                    error_count: row.get::<_, i64>(8)? as u64,
-                    started_at,
-                    completed_at,
-                    duration_millis: None,
-                })
-            },
-        )?;
-
-        let mut items = Vec::new();
-        for row in rows {
-            items.push(row?);
-        }
-
-        let total_pages = ((total_count as f64) / (limit as f64)).ceil() as u32;
-
-        Ok(ScanSessionPage {
-            items,
-            total_count,
-            page,
-            page_size: limit,
-            total_pages: if total_pages == 0 { 1 } else { total_pages },
-        })
-    }
-
-    /// Retrieves full breakdown for a specific scan session including category distribution and top directories.
-    pub fn get_session_details(db_pool: &DbPool, session_id: &str) -> Result<SessionDetails> {
-        let conn_arc = db_pool.conn();
-        let conn = conn_arc.lock().unwrap();
-
-        // 1. Session record
-        let session = conn
-            .query_row(
-                "SELECT s.id, s.drive_id, d.label, s.root_path, s.status,
-                        s.total_files, s.total_directories, s.total_bytes, s.error_count,
-                        s.started_at, s.completed_at
-                 FROM scan_sessions s
-                 LEFT JOIN drives d ON s.drive_id = d.id
-                 WHERE s.id = ?1",
-                [session_id],
+            let rows = data_stmt.query_map(
+                rusqlite::params_from_iter(query_params.iter().map(|b| b.as_ref())),
                 |row| {
                     let status_str: String = row.get(4)?;
-                    let status = match status_str.as_str() {
-                        "running" => ScanStatus::Running,
-                        "paused" => ScanStatus::Paused,
-                        "completed" => ScanStatus::Completed,
-                        "completed_with_errors" => ScanStatus::CompletedWithErrors,
-                        "cancelled" => ScanStatus::Cancelled,
-                        "failed" => ScanStatus::Failed,
-                        "interrupted" => ScanStatus::Interrupted,
-                        _ => ScanStatus::Queued,
-                    };
+                    let status = ScanStatus::from_str(&status_str);
+                    let started_at: String = row.get(9)?;
+                    let completed_at: Option<String> = row.get(10)?;
+
                     Ok(ScanSessionRecord {
                         id: row.get(0)?,
                         drive_id: row.get(1)?,
@@ -158,107 +86,160 @@ impl HistoryService {
                         total_directories: row.get::<_, i64>(6)? as u64,
                         total_bytes: row.get::<_, i64>(7)? as u64,
                         error_count: row.get::<_, i64>(8)? as u64,
-                        started_at: row.get(9)?,
-                        completed_at: row.get(10)?,
+                        started_at,
+                        completed_at,
                         duration_millis: None,
                     })
                 },
-            )
-            .map_err(|_| AppError::NotFound(format!("Scan session '{}' not found", session_id)))?;
+            )?;
 
-        // 2. Category summaries
-        let mut cat_stmt = conn.prepare(
-            "SELECT category, file_count, total_bytes
-             FROM category_summaries
-             WHERE session_id = ?1
-             ORDER BY total_bytes DESC",
-        )?;
+            let mut items = Vec::new();
+            for row in rows {
+                items.push(row?);
+            }
 
-        let cat_rows = cat_stmt.query_map([session_id], |row| {
-            let cat: String = row.get(0)?;
-            let file_count: u64 = row.get::<_, i64>(1)? as u64;
-            let total_bytes: u64 = row.get::<_, i64>(2)? as u64;
-            let percentage = if session.total_bytes > 0 {
-                ((total_bytes as f64) / (session.total_bytes as f64)) * 100.0
-            } else {
-                0.0
-            };
-            Ok(CategorySummaryItem {
-                category: cat,
-                file_count,
-                total_bytes,
-                percentage_bytes: percentage,
+            let total_pages = ((total_count as f64) / (limit as f64)).ceil() as u32;
+
+            Ok(ScanSessionPage {
+                items,
+                total_count,
+                page,
+                page_size: limit,
+                total_pages: if total_pages == 0 { 1 } else { total_pages },
             })
-        })?;
+        })
+    }
 
-        let mut categories = Vec::new();
-        for c in cat_rows {
-            categories.push(c?);
-        }
+    /// Retrieves full breakdown for a specific scan session including category distribution and top directories.
+    pub fn get_session_details(db_pool: &DbPool, session_id: &str) -> Result<SessionDetails> {
+        db_pool.with_read_conn(|conn| {
+            // 1. Session record
+            let session = conn
+                .query_row(
+                    "SELECT s.id, s.drive_id, d.label, s.root_path, s.status,
+                            s.total_files, s.total_directories, s.total_bytes, s.error_count,
+                            s.started_at, s.completed_at
+                     FROM scan_sessions s
+                     LEFT JOIN drives d ON s.drive_id = d.id
+                     WHERE s.id = ?1",
+                    [session_id],
+                    |row| {
+                        let status_str: String = row.get(4)?;
+                        Ok(ScanSessionRecord {
+                            id: row.get(0)?,
+                            drive_id: row.get(1)?,
+                            drive_label: row.get(2)?,
+                            root_path: row.get(3)?,
+                            status: ScanStatus::from_str(&status_str),
+                            total_files: row.get::<_, i64>(5)? as u64,
+                            total_directories: row.get::<_, i64>(6)? as u64,
+                            total_bytes: row.get::<_, i64>(7)? as u64,
+                            error_count: row.get::<_, i64>(8)? as u64,
+                            started_at: row.get(9)?,
+                            completed_at: row.get(10)?,
+                            duration_millis: None,
+                        })
+                    },
+                )
+                .map_err(|_| AppError::NotFound(format!("Scan session '{}' not found", session_id)))?;
 
-        // 3. Top 15 largest directories
-        let mut dir_stmt = conn.prepare(
-            "SELECT path, name, total_size_bytes, file_count, dir_count
-             FROM directories
-             WHERE session_id = ?1
-             ORDER BY total_size_bytes DESC
-             LIMIT 15",
-        )?;
+            // 2. Category summaries
+            let mut cat_stmt = conn.prepare(
+                "SELECT category, file_count, total_bytes
+                 FROM category_summaries
+                 WHERE session_id = ?1
+                 ORDER BY total_bytes DESC",
+            )?;
 
-        let dir_rows = dir_stmt.query_map([session_id], |row| {
-            Ok(DirectoryRecord {
-                path: row.get(0)?,
-                name: row.get(1)?,
-                total_size_bytes: row.get::<_, i64>(2)? as u64,
-                file_count: row.get::<_, i64>(3)? as u64,
-                dir_count: row.get::<_, i64>(4)? as u64,
+            let cat_rows = cat_stmt.query_map([session_id], |row| {
+                let cat: String = row.get(0)?;
+                let file_count: u64 = row.get::<_, i64>(1)? as u64;
+                let total_bytes: u64 = row.get::<_, i64>(2)? as u64;
+                let percentage = if session.total_bytes > 0 {
+                    ((total_bytes as f64) / (session.total_bytes as f64)) * 100.0
+                } else {
+                    0.0
+                };
+                Ok(CategorySummaryItem {
+                    category: cat,
+                    file_count,
+                    total_bytes,
+                    percentage_bytes: percentage,
+                })
+            })?;
+
+            let mut categories = Vec::new();
+            for c in cat_rows {
+                categories.push(c?);
+            }
+
+            // 3. Top 15 largest directories
+            let mut dir_stmt = conn.prepare(
+                "SELECT path, name, total_size_bytes, file_count, dir_count
+                 FROM directories
+                 WHERE session_id = ?1
+                 ORDER BY total_size_bytes DESC
+                 LIMIT 15",
+            )?;
+
+            let dir_rows = dir_stmt.query_map([session_id], |row| {
+                Ok(DirectoryRecord {
+                    path: row.get(0)?,
+                    name: row.get(1)?,
+                    total_size_bytes: row.get::<_, i64>(2)? as u64,
+                    file_count: row.get::<_, i64>(3)? as u64,
+                    dir_count: row.get::<_, i64>(4)? as u64,
+                })
+            })?;
+
+            let mut top_directories = Vec::new();
+            for d in dir_rows {
+                top_directories.push(d?);
+            }
+
+            // 4. Sample scan errors (up to 20)
+            let mut err_stmt = conn.prepare(
+                "SELECT path, error_type, message, occurred_at
+                 FROM scan_errors
+                 WHERE session_id = ?1
+                 ORDER BY id ASC
+                 LIMIT 20",
+            )?;
+
+            let err_rows = err_stmt.query_map([session_id], |row| {
+                Ok(ScanErrorItem {
+                    path: row.get(0)?,
+                    error_type: row.get(1)?,
+                    message: row.get(2)?,
+                    occurred_at: row.get(3)?,
+                })
+            })?;
+
+            let mut error_samples = Vec::new();
+            for e in err_rows {
+                error_samples.push(e?);
+            }
+
+            Ok(SessionDetails {
+                session,
+                categories,
+                top_directories,
+                error_samples,
             })
-        })?;
-
-        let mut top_directories = Vec::new();
-        for d in dir_rows {
-            top_directories.push(d?);
-        }
-
-        // 4. Sample scan errors (up to 20)
-        let mut err_stmt = conn.prepare(
-            "SELECT path, error_type, message, occurred_at
-             FROM scan_errors
-             WHERE session_id = ?1
-             ORDER BY id ASC
-             LIMIT 20",
-        )?;
-
-        let err_rows = err_stmt.query_map([session_id], |row| {
-            Ok(ScanErrorItem {
-                path: row.get(0)?,
-                error_type: row.get(1)?,
-                message: row.get(2)?,
-                occurred_at: row.get(3)?,
-            })
-        })?;
-
-        let mut error_samples = Vec::new();
-        for e in err_rows {
-            error_samples.push(e?);
-        }
-
-        Ok(SessionDetails {
-            session,
-            categories,
-            top_directories,
-            error_samples,
         })
     }
 
     /// Deletes a scan session and cascades deletion of files, directories, errors, and categories.
     pub fn delete_scan_session(db_pool: &DbPool, session_id: &str) -> Result<()> {
-        let conn_arc = db_pool.conn();
-        let conn = conn_arc.lock().unwrap();
+        let conn = db_pool.lock_conn();
         let deleted = conn.execute("DELETE FROM scan_sessions WHERE id = ?1", [session_id])?;
         if deleted == 0 {
             return Err(AppError::NotFound(format!("Session '{}' not found", session_id)));
         }
+        let _ = conn.execute(
+            "DELETE FROM app_settings WHERE key IN (?1, ?2)",
+            params![format!("dev_analyzed:{}", session_id), format!("intel_generated:{}", session_id)],
+        );
         info!("Deleted scan session '{}' and all associated records", session_id);
         Ok(())
     }
@@ -269,61 +250,60 @@ impl HistoryService {
         drive_id: Option<String>,
         limit: u32,
     ) -> Result<Vec<StorageSnapshotRecord>> {
-        let conn_arc = db_pool.conn();
-        let conn = conn_arc.lock().unwrap();
+        db_pool.with_read_conn(|conn| {
+            let l = limit.clamp(1, 100);
 
-        let l = limit.clamp(1, 100);
-
-        let mut snapshots = Vec::new();
-        if let Some(ref did) = drive_id {
-            let mut stmt = conn.prepare(
-                "SELECT id, session_id, drive_id, label, root_path, total_files, total_directories, total_bytes, created_at
-                 FROM storage_snapshots
-                 WHERE drive_id = ?1
-                 ORDER BY created_at DESC
-                 LIMIT ?2",
-            )?;
-            let rows = stmt.query_map(params![did, l as i64], |row| {
-                Ok(StorageSnapshotRecord {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    drive_id: row.get(2)?,
-                    label: row.get(3)?,
-                    root_path: row.get(4)?,
-                    total_files: row.get::<_, i64>(5)? as u64,
-                    total_directories: row.get::<_, i64>(6)? as u64,
-                    total_bytes: row.get::<_, i64>(7)? as u64,
-                    created_at: row.get(8)?,
-                })
-            })?;
-            for r in rows {
-                snapshots.push(r?);
+            let mut snapshots = Vec::new();
+            if let Some(ref did) = drive_id {
+                let mut stmt = conn.prepare(
+                    "SELECT id, session_id, drive_id, label, root_path, total_files, total_directories, total_bytes, created_at
+                     FROM storage_snapshots
+                     WHERE drive_id = ?1
+                     ORDER BY created_at DESC
+                     LIMIT ?2",
+                )?;
+                let rows = stmt.query_map(params![did, l as i64], |row| {
+                    Ok(StorageSnapshotRecord {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        drive_id: row.get(2)?,
+                        label: row.get(3)?,
+                        root_path: row.get(4)?,
+                        total_files: row.get::<_, i64>(5)? as u64,
+                        total_directories: row.get::<_, i64>(6)? as u64,
+                        total_bytes: row.get::<_, i64>(7)? as u64,
+                        created_at: row.get(8)?,
+                    })
+                })?;
+                for r in rows {
+                    snapshots.push(r?);
+                }
+            } else {
+                let mut stmt = conn.prepare(
+                    "SELECT id, session_id, drive_id, label, root_path, total_files, total_directories, total_bytes, created_at
+                     FROM storage_snapshots
+                     ORDER BY created_at DESC
+                     LIMIT ?1",
+                )?;
+                let rows = stmt.query_map(params![l as i64], |row| {
+                    Ok(StorageSnapshotRecord {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        drive_id: row.get(2)?,
+                        label: row.get(3)?,
+                        root_path: row.get(4)?,
+                        total_files: row.get::<_, i64>(5)? as u64,
+                        total_directories: row.get::<_, i64>(6)? as u64,
+                        total_bytes: row.get::<_, i64>(7)? as u64,
+                        created_at: row.get(8)?,
+                    })
+                })?;
+                for r in rows {
+                    snapshots.push(r?);
+                }
             }
-        } else {
-            let mut stmt = conn.prepare(
-                "SELECT id, session_id, drive_id, label, root_path, total_files, total_directories, total_bytes, created_at
-                 FROM storage_snapshots
-                 ORDER BY created_at DESC
-                 LIMIT ?1",
-            )?;
-            let rows = stmt.query_map(params![l as i64], |row| {
-                Ok(StorageSnapshotRecord {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    drive_id: row.get(2)?,
-                    label: row.get(3)?,
-                    root_path: row.get(4)?,
-                    total_files: row.get::<_, i64>(5)? as u64,
-                    total_directories: row.get::<_, i64>(6)? as u64,
-                    total_bytes: row.get::<_, i64>(7)? as u64,
-                    created_at: row.get(8)?,
-                })
-            })?;
-            for r in rows {
-                snapshots.push(r?);
-            }
-        }
-        Ok(snapshots)
+            Ok(snapshots)
+        })
     }
 
     /// Records a point-in-time snapshot for a drive.
@@ -332,15 +312,14 @@ impl HistoryService {
         drive_id: &str,
         label: &str,
     ) -> Result<StorageSnapshotRecord> {
-        let conn_arc = db_pool.conn();
-        let conn = conn_arc.lock().unwrap();
+        let conn = db_pool.lock_conn();
 
         // Lookup latest completed session for this drive or fallback to drive metrics
         let latest_session_opt: Option<(String, String, u64, u64, u64)> = conn
             .query_row(
                 "SELECT id, root_path, total_files, total_directories, total_bytes
                  FROM scan_sessions
-                 WHERE drive_id = ?1 AND status IN ('completed', 'completed_with_errors')
+                 WHERE drive_id = ?1 AND status IN ('completed', 'completed_with_errors', 'completedWithErrors')
                  ORDER BY started_at DESC
                  LIMIT 1",
                 [drive_id],
@@ -416,10 +395,8 @@ impl HistoryService {
         let files_delta = (target.total_files as i64) - (baseline.total_files as i64);
         let directories_delta = (target.total_directories as i64) - (baseline.total_directories as i64);
 
-        let conn_arc = db_pool.conn();
-        let conn = conn_arc.lock().unwrap();
-
-        // 1. Category deltas
+        db_pool.with_read_conn(|conn| {
+            // 1. Category deltas
         let mut cat_stmt = conn.prepare(
             "WITH all_cats AS (
                 SELECT category FROM category_summaries WHERE session_id = ?1
@@ -643,6 +620,7 @@ impl HistoryService {
             added_files_sample,
             removed_files_sample,
             modified_files_sample,
+        })
         })
     }
 }

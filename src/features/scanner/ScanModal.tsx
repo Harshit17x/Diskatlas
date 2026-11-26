@@ -489,7 +489,9 @@ export const ScanModal: React.FC = () => {
                 </div>
                 <div className="space-y-1 max-h-28 overflow-y-auto pr-1">
                   {progress.recentFiles.slice().reverse().map((filePath, idx) => {
-                    const fileName = filePath.split('/').pop() || filePath;
+                    const lastSep = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'));
+                    const fileName = lastSep >= 0 ? filePath.slice(lastSep + 1) : filePath;
+                    const dirPart = lastSep > 0 ? filePath.slice(0, lastSep) : '/';
                     return (
                       <div
                         key={`${filePath}-${idx}`}
@@ -499,7 +501,7 @@ export const ScanModal: React.FC = () => {
                           {fileName}
                         </span>
                         <span className="text-[10px] text-muted truncate max-w-[180px] ml-2 text-right">
-                          {filePath.substring(0, filePath.lastIndexOf('/')) || '/'}
+                          {dirPart}
                         </span>
                       </div>
                     );

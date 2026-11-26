@@ -5,8 +5,7 @@ import type {
   StorageAnalysisProfile,
 } from '../types/bindings';
 import { safeInvoke } from '../utils/tauri';
-import { useScanStore } from './scanStore';
-import { useHistoryStore } from './historyStore';
+import { resolvePreferredSessionId } from '../utils/session';
 
 interface AnalysisState {
   activeProfile: StorageAnalysisProfile | null;
@@ -47,25 +46,11 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
   },
 
   fetchAnalysis: async (sessionIdOverride) => {
-    // Resolve target session ID: either passed in, active in scanStore, or most recent in historyStore
-    let sid = sessionIdOverride;
-    if (!sid) {
-      sid = useScanStore.getState().activeSessionId || useScanStore.getState().summary?.sessionId;
-    }
-    if (!sid) {
-      const recent = useHistoryStore.getState().sessionsPage?.items[0];
-      if (recent) {
-        sid = recent.id;
-      }
-    }
-
-    if (!sid) {
-      return;
-    }
+    const sid = resolvePreferredSessionId(sessionIdOverride);
 
     set({ isLoading: true, error: null });
     const res = await safeInvoke<StorageAnalysisProfile>('get_storage_analysis', {
-      sessionId: sid,
+      sessionId: sid || null,
     });
 
     if (res.ok) {
@@ -79,10 +64,7 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
   },
 
   runClassification: async (sessionIdOverride) => {
-    let sid = sessionIdOverride;
-    if (!sid) {
-      sid = get().activeProfile?.sessionId || useScanStore.getState().activeSessionId || undefined;
-    }
+    const sid = sessionIdOverride || get().activeProfile?.sessionId || resolvePreferredSessionId();
     if (!sid) return;
 
     set({ isLoading: true, error: null });
@@ -98,7 +80,7 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
   },
 
   fetchCategoryFiles: async (sessionIdOverride, categoryOverride, page = 1, pageSize = 50) => {
-    const sid = sessionIdOverride || get().activeProfile?.sessionId;
+    const sid = sessionIdOverride || get().activeProfile?.sessionId || resolvePreferredSessionId();
     const cat = categoryOverride || get().selectedCategory;
     if (!sid || !cat) return;
 

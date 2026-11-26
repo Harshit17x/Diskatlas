@@ -14,7 +14,7 @@ impl VisualizationService {
         conn: &Connection,
         query: HierarchicalQuery,
     ) -> Result<HierarchicalNode> {
-        let sid = Self::resolve_session_id(conn, query.session_id.as_deref())?;
+        let sid = crate::storage::resolve_session_id(conn, query.session_id.as_deref())?;
 
         // 1. Resolve starting root path
         let root_path = match query.root_path {
@@ -39,10 +39,6 @@ impl VisualizationService {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap_or_else(|_| {
-                // If directory record not found (e.g. a session scanned before the root row
-                // was introduced, or a non-standard root), fall back to the session totals.
-                // Both the size AND the file count are taken from scan_sessions so the root
-                // node never reports a hardcoded zero file count.
                 conn.query_row(
                     "SELECT COALESCE(total_bytes, 0), COALESCE(total_files, 0) FROM scan_sessions WHERE id = ?1",
                     [&sid],
@@ -52,10 +48,12 @@ impl VisualizationService {
             });
 
         let max_depth = query.max_depth.unwrap_or(3).clamp(1, 5);
+        // Scale default threshold at 0.1% of root size capped at 25 MB so large folders
+        // on multi-hundred-GB drives are not silently hidden inside "Other items".
         let threshold = query
             .min_bytes_threshold
-            .unwrap_or_else(|| (root_size as f64 * 0.002) as i64) // default 0.2% of total size
-            .max(1024); // at least 1 KB
+            .unwrap_or_else(|| ((root_size as f64 * 0.001) as i64).min(25 * 1024 * 1024))
+            .max(1024);
 
         info!(
             session_id = %sid,
@@ -81,6 +79,8 @@ impl VisualizationService {
             category: Some("drive_root".to_string()),
             is_directory: true,
             file_count: Some(root_file_count),
+            session_id: Some(sid),
+            is_synthetic: Some(false),
             children: if children.is_empty() { None } else { Some(children) },
         })
     }
@@ -99,19 +99,21 @@ impl VisualizationService {
         }
 
         let mut child_nodes: Vec<HierarchicalNode> = Vec::new();
-        let mut other_bytes = 0i64;
-        let mut other_count = 0i64;
+        let mut represented_dir_bytes = 0i64;
+        let mut represented_dir_files = 0i64;
+        let mut represented_file_bytes = 0i64;
+        let mut represented_file_count = 0i64;
 
-        // 1. Query direct subdirectories
+        // 1. Query direct subdirectories (top 35 above threshold)
         let mut dir_stmt = conn.prepare(
             "SELECT path, name, total_size_bytes, file_count
              FROM directories
-             WHERE session_id = ?1 AND parent_path = ?2
+             WHERE session_id = ?1 AND parent_path = ?2 AND total_size_bytes >= ?3
              ORDER BY total_size_bytes DESC
              LIMIT 35"
         )?;
 
-        let dir_rows = dir_stmt.query_map(params![session_id, parent_path], |row| {
+        let dir_rows = dir_stmt.query_map(params![session_id, parent_path, threshold], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -122,11 +124,8 @@ impl VisualizationService {
 
         for r in dir_rows {
             let (path, name, size_bytes, file_count) = r?;
-            if size_bytes < threshold {
-                other_bytes += size_bytes;
-                other_count += file_count;
-                continue;
-            }
+            represented_dir_bytes += size_bytes;
+            represented_dir_files += file_count;
 
             let sub_children = if current_depth < max_depth {
                 let sub = Self::build_children(conn, session_id, &path, current_depth + 1, max_depth, threshold)?;
@@ -144,6 +143,8 @@ impl VisualizationService {
                 category: Some(category),
                 is_directory: true,
                 file_count: Some(file_count),
+                session_id: None,
+                is_synthetic: Some(false),
                 children: sub_children,
             });
         }
@@ -168,6 +169,8 @@ impl VisualizationService {
 
         for r in file_rows {
             let (path, name, size_bytes, cat) = r?;
+            represented_file_bytes += size_bytes;
+            represented_file_count += 1;
             child_nodes.push(HierarchicalNode {
                 name,
                 path,
@@ -175,19 +178,46 @@ impl VisualizationService {
                 category: cat.or_else(|| Some("documents".to_string())),
                 is_directory: false,
                 file_count: Some(1),
+                session_id: None,
+                is_synthetic: Some(false),
                 children: None,
             });
         }
 
-        // 3. If there were smaller items below threshold, aggregate them into a synthetic node
-        if other_bytes > 0 {
+        // 3. Aggregate all remaining direct subdirectories and direct files (below threshold or beyond LIMIT)
+        let (all_dir_bytes, all_dir_files): (i64, i64) = conn.query_row(
+            "SELECT COALESCE(SUM(total_size_bytes), 0), COALESCE(SUM(file_count), 0)
+             FROM directories
+             WHERE session_id = ?1 AND parent_path = ?2",
+            params![session_id, parent_path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        let (all_file_bytes, all_file_count): (i64, i64) = conn.query_row(
+            "SELECT COALESCE(SUM(size_bytes), 0), COUNT(*)
+             FROM files
+             WHERE session_id = ?1 AND parent_path = ?2",
+            params![session_id, parent_path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        let other_bytes = all_dir_bytes.saturating_sub(represented_dir_bytes)
+            + all_file_bytes.saturating_sub(represented_file_bytes);
+        let other_count = all_dir_files.saturating_sub(represented_dir_files)
+            + all_file_count.saturating_sub(represented_file_count);
+
+        if other_bytes > 0 || other_count > 0 {
+            let clean_parent = parent_path.trim_end_matches(['/', '\\']);
+            let sep = if parent_path.contains('\\') { "\\" } else { "/" };
             child_nodes.push(HierarchicalNode {
                 name: "Other items".to_string(),
-                path: format!("{}/[other]", parent_path.trim_end_matches('/')),
+                path: format!("{}{}[other]", clean_parent, sep),
                 value: other_bytes,
                 category: Some("unknown".to_string()),
                 is_directory: false,
                 file_count: Some(other_count),
+                session_id: None,
+                is_synthetic: Some(true),
                 children: None,
             });
         }
@@ -203,7 +233,7 @@ impl VisualizationService {
         conn: &Connection,
         session_id: Option<&str>,
     ) -> Result<StorageAnalyticsData> {
-        let sid = match Self::resolve_session_id(conn, session_id) {
+        let sid = match crate::storage::resolve_session_id(conn, session_id) {
             Ok(s) => s,
             Err(_) => {
                 // If no session exists, return an empty analytics model immediately without failing or blocking
@@ -415,15 +445,15 @@ impl VisualizationService {
             .filter_map(|r| r.ok())
             .collect();
 
-        // 6. Storage Growth History Snapshots
+        // 6. Storage Growth History Snapshots (20 newest, ordered chronologically)
         let mut hist_stmt = conn.prepare(
             "SELECT id, session_id, drive_id, label, root_path, total_files, total_directories, total_bytes, created_at
              FROM storage_snapshots
-             ORDER BY created_at ASC
+             ORDER BY created_at DESC, id DESC
              LIMIT 20"
         )?;
 
-        let history_trends: Vec<StorageSnapshotRecord> = hist_stmt
+        let mut history_trends: Vec<StorageSnapshotRecord> = hist_stmt
             .query_map([], |row| {
                 Ok(StorageSnapshotRecord {
                     id: row.get(0)?,
@@ -439,6 +469,7 @@ impl VisualizationService {
             })?
             .filter_map(|r| r.ok())
             .collect();
+        history_trends.reverse();
 
         Ok(StorageAnalyticsData {
             session_id: sid,
@@ -451,30 +482,6 @@ impl VisualizationService {
             developer_storage,
             history_trends,
         })
-    }
-
-    /// Resolves target session id, falling back to latest session
-    fn resolve_session_id(conn: &Connection, requested: Option<&str>) -> Result<String> {
-        if let Some(id) = requested {
-            if !id.trim().is_empty() {
-                return Ok(id.to_string());
-            }
-        }
-
-        let latest: Option<String> = conn
-            .query_row(
-                "SELECT id FROM scan_sessions WHERE status IN ('completed', 'completedWithErrors', 'completed_with_errors', 'interrupted') ORDER BY started_at DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .ok();
-
-        match latest {
-            Some(id) => Ok(id),
-            None => Err(crate::error::AppError::NotFound(
-                "No completed scan sessions found for visualization".to_string(),
-            )),
-        }
     }
 
     /// Helper to infer high-level category of directory from name and path
@@ -595,5 +602,55 @@ mod tests {
 
         assert!(!analytics.application_storage.is_empty());
         assert_eq!(analytics.application_storage[0].app_name, "VS Code");
+    }
+
+    #[test]
+    fn test_other_items_includes_small_files_and_history_is_newest_first() {
+        let conn = setup_test_db();
+        conn.execute(
+            "INSERT INTO directories (session_id, path, name, parent_path, total_size_bytes, file_count)
+             VALUES
+             ('sess-vis-1', 'C:\\', 'C:\\', NULL, 20000000, 3),
+             ('sess-vis-1', 'C:\\Big', 'Big', 'C:\\', 15000000, 1),
+             ('sess-vis-1', 'C:\\Small', 'Small', 'C:\\', 200000, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files (session_id, path, name, extension, parent_path, size_bytes, category)
+             VALUES ('sess-vis-1', 'C:\\tiny.log', 'tiny.log', 'log', 'C:\\', 500000, 'temporary')",
+            [],
+        )
+        .unwrap();
+
+        let tree = VisualizationService::get_hierarchical_tree(
+            &conn,
+            HierarchicalQuery {
+                session_id: Some("sess-vis-1".to_string()),
+                root_path: Some("C:\\".to_string()),
+                max_depth: Some(2),
+                min_bytes_threshold: Some(1000000),
+            },
+        )
+        .unwrap();
+        assert_eq!(tree.session_id.as_deref(), Some("sess-vis-1"));
+        let children = tree.children.unwrap();
+        let other = children.iter().find(|c| c.is_synthetic == Some(true)).unwrap();
+        assert_eq!(other.value, 700000);
+        assert_eq!(other.file_count, Some(2));
+
+        // Insert 25 snapshots and confirm newest 20 are returned oldest->newest
+        for i in 1..=25u32 {
+            conn.execute(
+                "INSERT INTO storage_snapshots (id, drive_id, label, root_path, total_files, total_directories, total_bytes, created_at)
+                 VALUES (?1, 'DRIVE_VIS_TEST', ?2, 'C:\\', 10, 2, 1000, ?3)",
+                params![format!("snap-{:02}", i), format!("S{:02}", i), format!("2026-11-{:02}T00:00:00Z", i)],
+            )
+            .unwrap();
+        }
+        let analytics = VisualizationService::get_storage_analytics(&conn, Some("sess-vis-1")).unwrap();
+        assert_eq!(analytics.history_trends.len(), 20);
+        assert_eq!(analytics.history_trends[0].label, "S06");
+        assert_eq!(analytics.history_trends[19].label, "S25");
     }
 }

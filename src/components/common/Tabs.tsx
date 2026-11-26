@@ -15,7 +15,7 @@ export interface TabsProps {
 
 export const Tabs: React.FC<TabsProps> = ({ tabs, activeTab, onChange, className }) => {
   return (
-    <div className={`flex items-center gap-1 border-b border-border p-1 bg-[#15171B] rounded ${className || ''}`}>
+    <div className={`flex items-center gap-1 border-b border-border p-1 bg-panel rounded ${className || ''}`}>
       {tabs.map((tab) => {
         const isActive = tab.id === activeTab;
         return (
@@ -25,7 +25,7 @@ export const Tabs: React.FC<TabsProps> = ({ tabs, activeTab, onChange, className
             className={`px-3 py-1.5 text-xs font-medium rounded transition-colors flex items-center gap-2 ${
               isActive
                 ? 'bg-elevated text-primary shadow-sm border border-border-light'
-                : 'text-secondary hover:text-primary hover:bg-[#1E2127]'
+                : 'text-secondary hover:text-primary hover:bg-elevated/60'
             }`}
           >
             <span>{tab.label}</span>

@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Card } from '../../components/common/Card';
 import { Button } from '../../components/common/Button';
 import { Badge } from '../../components/common/Badge';
@@ -30,14 +30,27 @@ export const HiddenFilesView: React.FC = () => {
     fetchHiddenFiles,
     selectedSessionId,
     setSelectedSessionId,
+    error,
   } = useAdvancedAnalysisStore();
 
   const { sessionsPage, fetchSessions } = useHistoryStore();
+  const isFirstSearchRender = useRef(true);
 
   useEffect(() => {
     fetchSessions(1, 20);
     fetchHiddenFiles();
   }, [fetchSessions, fetchHiddenFiles]);
+
+  useEffect(() => {
+    if (isFirstSearchRender.current) {
+      isFirstSearchRender.current = false;
+      return;
+    }
+    const timer = setTimeout(() => {
+      fetchHiddenFiles();
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [hiddenFilesQuery.search, fetchHiddenFiles]);
 
   const handleSessionChange = (sid: string) => {
     setSelectedSessionId(sid || null);
@@ -51,7 +64,6 @@ export const HiddenFilesView: React.FC = () => {
 
   const handleSearchChange = (search: string) => {
     setHiddenFilesQuery({ search, page: 1 });
-    fetchHiddenFiles();
   };
 
   const handlePageChange = (newPage: number) => {
@@ -162,7 +174,7 @@ export const HiddenFilesView: React.FC = () => {
           <select
             value={selectedSessionId || ''}
             onChange={(e) => handleSessionChange(e.target.value)}
-            className="bg-[#15171B] border border-border rounded px-2.5 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
+            className="bg-panel border border-border rounded px-2.5 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
           >
             <option value="">Latest Completed Scan</option>
             {sessionsPage?.items.map((s) => (
@@ -185,7 +197,7 @@ export const HiddenFilesView: React.FC = () => {
       </div>
 
       {/* 2. Non-Destructive Protection Notice */}
-      <Card padding="md" className="border-warning/30 bg-[#16181C] flex items-start gap-3">
+      <Card padding="md" className="border-warning/30 bg-panel flex items-start gap-3">
         <ShieldAlert className="w-4 h-4 text-warning flex-shrink-0 mt-0.5" />
         <div className="text-xs space-y-0.5">
           <span className="font-semibold text-primary">Safety Policy — Read-Only Non-Destructive Inspection:</span>
@@ -254,7 +266,7 @@ export const HiddenFilesView: React.FC = () => {
               className={`px-2.5 py-1 text-xs rounded transition-colors whitespace-nowrap ${
                 hiddenFilesQuery.filterType === f.id
                   ? 'bg-accent text-white font-medium'
-                  : 'bg-elevated text-secondary hover:text-primary hover:bg-[#282D35]'
+                  : 'bg-elevated text-secondary hover:text-primary hover:bg-elevated/80'
               }`}
             >
               {f.label}
@@ -270,10 +282,16 @@ export const HiddenFilesView: React.FC = () => {
             placeholder="Search path or filename..."
             value={hiddenFilesQuery.search || ''}
             onChange={(e) => handleSearchChange(e.target.value)}
-            className="w-full bg-[#15171B] border border-border rounded pl-8 pr-3 py-1.5 text-xs text-primary placeholder-muted focus:outline-none focus:border-accent font-mono"
+            className="w-full bg-panel border border-border rounded pl-8 pr-3 py-1.5 text-xs text-primary placeholder-muted focus:outline-none focus:border-accent font-mono"
           />
         </div>
       </div>
+
+      {error && (
+        <div className="p-3 rounded border border-danger/30 bg-danger/10 text-xs text-danger">
+          {error}
+        </div>
+      )}
 
       {/* 5. Data Table */}
       <div className="space-y-2">

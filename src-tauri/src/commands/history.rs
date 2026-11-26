@@ -1,6 +1,6 @@
 use tauri::{command, State};
 
-use crate::error::Result;
+use crate::error::{AppError, Result};
 use crate::models::history::{
     ScanComparisonResult, ScanSessionPage, SessionDetails, StorageSnapshotRecord,
 };
@@ -15,9 +15,14 @@ pub async fn get_scan_sessions(
     status: Option<String>,
     db: State<'_, DbPool>,
 ) -> Result<ScanSessionPage> {
+    let pool = (*db).clone();
     let p = page.unwrap_or(1);
     let ps = page_size.unwrap_or(20);
-    HistoryService::get_scan_sessions(&db, p, ps, drive_id, status)
+    tokio::task::spawn_blocking(move || {
+        HistoryService::get_scan_sessions(&pool, p, ps, drive_id, status)
+    })
+    .await
+    .map_err(|e| AppError::System(format!("Scan sessions task failed: {}", e)))?
 }
 
 #[command]
@@ -25,7 +30,10 @@ pub async fn get_session_details(
     session_id: String,
     db: State<'_, DbPool>,
 ) -> Result<SessionDetails> {
-    HistoryService::get_session_details(&db, &session_id)
+    let pool = (*db).clone();
+    tokio::task::spawn_blocking(move || HistoryService::get_session_details(&pool, &session_id))
+        .await
+        .map_err(|e| AppError::System(format!("Session details task failed: {}", e)))?
 }
 
 #[command]
@@ -33,7 +41,10 @@ pub async fn delete_scan_session(
     session_id: String,
     db: State<'_, DbPool>,
 ) -> Result<()> {
-    HistoryService::delete_scan_session(&db, &session_id)
+    let pool = (*db).clone();
+    tokio::task::spawn_blocking(move || HistoryService::delete_scan_session(&pool, &session_id))
+        .await
+        .map_err(|e| AppError::System(format!("Delete session task failed: {}", e)))?
 }
 
 #[command]
@@ -42,8 +53,11 @@ pub async fn get_storage_snapshots(
     limit: Option<u32>,
     db: State<'_, DbPool>,
 ) -> Result<Vec<StorageSnapshotRecord>> {
+    let pool = (*db).clone();
     let l = limit.unwrap_or(20);
-    HistoryService::get_storage_snapshots(&db, drive_id, l)
+    tokio::task::spawn_blocking(move || HistoryService::get_storage_snapshots(&pool, drive_id, l))
+        .await
+        .map_err(|e| AppError::System(format!("Snapshots task failed: {}", e)))?
 }
 
 #[command]
@@ -52,7 +66,12 @@ pub async fn create_manual_snapshot(
     label: String,
     db: State<'_, DbPool>,
 ) -> Result<StorageSnapshotRecord> {
-    HistoryService::create_manual_snapshot(&db, &drive_id, &label)
+    let pool = (*db).clone();
+    tokio::task::spawn_blocking(move || {
+        HistoryService::create_manual_snapshot(&pool, &drive_id, &label)
+    })
+    .await
+    .map_err(|e| AppError::System(format!("Create snapshot task failed: {}", e)))?
 }
 
 #[command]
@@ -61,6 +80,11 @@ pub async fn compare_scans(
     target_session_id: String,
     db: State<'_, DbPool>,
 ) -> Result<ScanComparisonResult> {
-    HistoryService::compare_scans(&db, &baseline_session_id, &target_session_id)
+    let pool = (*db).clone();
+    tokio::task::spawn_blocking(move || {
+        HistoryService::compare_scans(&pool, &baseline_session_id, &target_session_id)
+    })
+    .await
+    .map_err(|e| AppError::System(format!("Compare scans task failed: {}", e)))?
 }
 

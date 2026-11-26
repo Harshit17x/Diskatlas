@@ -94,7 +94,7 @@ export const DriveDetailsModal: React.FC = () => {
       ) : drive ? (
         <div className="space-y-4">
           {/* Top Summary Banner */}
-          <div className="p-3 bg-[#15171B] border border-border rounded flex items-center justify-between">
+          <div className="p-3 bg-elevated border border-border rounded flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded bg-elevated border border-border flex items-center justify-center">
                 {getDriveIcon(drive.driveType)}
@@ -121,7 +121,7 @@ export const DriveDetailsModal: React.FC = () => {
           </div>
 
           {/* Capacity Diagnostic Section */}
-          <div className="p-3 bg-[#14161A] border border-border rounded space-y-2">
+          <div className="p-3 bg-elevated border border-border rounded space-y-2">
             <span className="text-[10px] uppercase font-semibold text-muted tracking-wider block">
               Storage Allocation Metrics
             </span>
@@ -149,7 +149,7 @@ export const DriveDetailsModal: React.FC = () => {
                 </div>
 
                 {drive.usedPercent !== null && (
-                  <div className="h-1.5 w-full bg-[#1B1E23] rounded-sm overflow-hidden border border-border mt-2">
+                  <div className="h-1.5 w-full bg-canvas rounded-sm overflow-hidden border border-border mt-2">
                     <div
                       className={`h-full rounded-sm ${
                         drive.usedPercent >= 90
@@ -172,28 +172,28 @@ export const DriveDetailsModal: React.FC = () => {
 
           {/* Hardware Parameters Grid */}
           <div className="grid grid-cols-2 gap-2 text-xs font-mono">
-            <div className="p-2.5 bg-[#15171B] border border-border rounded">
+            <div className="p-2.5 bg-elevated border border-border rounded">
               <span className="text-[10px] text-muted uppercase font-sans block">Filesystem</span>
               <span className="text-primary font-semibold mt-0.5 block">
                 {drive.fileSystem || 'Raw / Unknown'}
               </span>
             </div>
 
-            <div className="p-2.5 bg-[#15171B] border border-border rounded">
+            <div className="p-2.5 bg-elevated border border-border rounded">
               <span className="text-[10px] text-muted uppercase font-sans block">Bus Interface</span>
               <span className="text-primary font-semibold mt-0.5 block truncate">
                 {activeDriveDetails?.busType || 'OS Storage Bus'}
               </span>
             </div>
 
-            <div className="p-2.5 bg-[#15171B] border border-border rounded">
+            <div className="p-2.5 bg-elevated border border-border rounded">
               <span className="text-[10px] text-muted uppercase font-sans block">Allocation Unit (Cluster)</span>
               <span className="text-primary mt-0.5 block">
                 {clusterSize ? `${clusterSize} bytes (${formatBytes(clusterSize)})` : 'Default'}
               </span>
             </div>
 
-            <div className="p-2.5 bg-[#15171B] border border-border rounded">
+            <div className="p-2.5 bg-elevated border border-border rounded">
               <span className="text-[10px] text-muted uppercase font-sans block">Volume Identifier / Serial</span>
               <span className="text-primary mt-0.5 block truncate">
                 {drive.volumeId || drive.id}

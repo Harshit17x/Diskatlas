@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { invoke } from '@tauri-apps/api/core';
+import { safeInvoke } from '../utils/tauri';
+import { resolvePreferredSessionId } from '../utils/session';
 import type {
   CleanupPlan,
   ExecuteCleanupRequest,
@@ -37,7 +38,7 @@ interface CleanupState {
   auditStatusFilter: string | null;
 
   // Actions
-  fetchCleanupPlan: (sessionId: string) => Promise<void>;
+  fetchCleanupPlan: (sessionId?: string | null) => Promise<void>;
   toggleCandidateSelection: (id: string) => void;
   selectAllSafe: () => void;
   deselectAll: () => void;
@@ -74,26 +75,28 @@ export const useCleanupStore = create<CleanupState>((set, get) => ({
   auditLoading: false,
   auditStatusFilter: null,
 
-  fetchCleanupPlan: async (sessionId: string) => {
+  fetchCleanupPlan: async (sessionId?: string | null) => {
+    const sid = resolvePreferredSessionId(sessionId);
     set({ loadingPlan: true, error: null });
-    try {
-      const plan = await invoke<CleanupPlan>('get_cleanup_plan', { sessionId });
+    const res = await safeInvoke<CleanupPlan>('get_cleanup_plan', {
+      sessionId: sid || null,
+    });
+    if (res.ok) {
       const initialSelected = new Set<string>();
-      plan.candidates.forEach((c) => {
+      res.data.candidates.forEach((c) => {
         if (c.selected && !c.isBlocked) {
           initialSelected.add(c.id);
         }
       });
 
       set({
-        cleanupPlan: plan,
+        cleanupPlan: res.data,
         selectedIds: initialSelected,
         loadingPlan: false,
       });
-    } catch (err) {
-      console.error('Failed to fetch cleanup plan:', err);
+    } else {
       set({
-        error: typeof err === 'string' ? err : 'Failed to generate cleanup plan',
+        error: res.error.message,
         loadingPlan: false,
       });
     }
@@ -143,56 +146,56 @@ export const useCleanupStore = create<CleanupState>((set, get) => ({
     if (!cleanupPlan || selectedIds.size === 0) return false;
 
     set({ executingCleanup: true, error: null });
-    try {
-      const request: ExecuteCleanupRequest = {
-        batchId: cleanupPlan.batchId,
-        sessionId: cleanupPlan.sessionId,
-        itemIds: Array.from(selectedIds),
-        useRecycleBin,
-        confirmationPhrase,
-      };
+    const request: ExecuteCleanupRequest = {
+      batchId: cleanupPlan.batchId,
+      sessionId: cleanupPlan.sessionId,
+      itemIds: Array.from(selectedIds),
+      useRecycleBin,
+      confirmationPhrase,
+    };
 
-      const res = await invoke<ExecuteCleanupResponse>('execute_cleanup', { request });
+    const res = await safeInvoke<ExecuteCleanupResponse>('execute_cleanup', { request });
+    if (res.ok) {
       set({
-        executionResponse: res,
+        executionResponse: res.data,
         executingCleanup: false,
         confirmationModalOpen: false,
       });
 
-      // Refresh plan and audit history
       await fetchAuditHistory(1);
       await fetchCleanupPlan(cleanupPlan.sessionId);
-      return true;
-    } catch (err) {
-      console.error('Cleanup execution error:', err);
-      set({
-        error: typeof err === 'string' ? err : 'Failed to execute cleanup operation',
-        executingCleanup: false,
+      import('./driveStore').then(({ useDriveStore }) => {
+        useDriveStore.getState().fetchDbHealth();
       });
-      return false;
+      return true;
     }
+
+    set({
+      error: res.error.message,
+      executingCleanup: false,
+    });
+    return false;
   },
 
   fetchAuditHistory: async (page = 1, status) => {
     set({ auditLoading: true });
-    try {
-      const query: CleanupAuditQuery = {
-        page,
-        pageSize: 15,
-        status: status || undefined,
-      };
-      const res = await invoke<CleanupAuditResponse>('get_cleanup_audit_history', { query });
+    const query: CleanupAuditQuery = {
+      page,
+      pageSize: 15,
+      status: status || undefined,
+    };
+    const res = await safeInvoke<CleanupAuditResponse>('get_cleanup_audit_history', { query });
+    if (res.ok) {
       set({
-        auditRecords: res.items,
-        auditTotalItems: res.totalItems,
-        auditPage: res.page,
-        auditTotalPages: res.totalPages,
+        auditRecords: res.data.items,
+        auditTotalItems: res.data.totalItems,
+        auditPage: res.data.page,
+        auditTotalPages: res.data.totalPages,
         auditLoading: false,
         auditStatusFilter: status || null,
       });
-    } catch (err) {
-      console.error('Failed to fetch audit history:', err);
-      set({ auditLoading: false });
+    } else {
+      set({ auditLoading: false, error: res.error.message });
     }
   },
 

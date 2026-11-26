@@ -57,7 +57,7 @@ export const CleanupResultsBanner: React.FC = () => {
       )}
 
       {/* Item results scroll list */}
-      <div className="max-h-32 overflow-y-auto border border-border rounded divide-y divide-border bg-[#101114] text-xs">
+      <div className="max-h-32 overflow-y-auto border border-border rounded divide-y divide-border bg-elevated text-xs">
         {results.map((r, i) => (
           <div key={i} className="p-2 flex items-center justify-between gap-2">
             <div className="truncate">
@@ -74,7 +74,7 @@ export const CleanupResultsBanner: React.FC = () => {
                     ? 'bg-success/20 text-success'
                     : r.status === 'blocked_security'
                     ? 'bg-warning/20 text-warning'
-                    : 'bg-[#DB6262]/20 text-[#DB6262]'
+                    : 'bg-danger/20 text-danger'
                 }`}
               >
                 {r.status.replace('_', ' ')}

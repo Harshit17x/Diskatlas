@@ -33,9 +33,45 @@ pub fn is_system_critical_path(path: &Path) -> (bool, Option<&'static str>) {
         return (crit, reason);
     }
     if normalized != path {
-        return check_path_against_rules(&normalized);
+        let (norm_crit, norm_reason) = check_path_against_rules(&normalized);
+        if norm_crit {
+            return (norm_crit, norm_reason);
+        }
+    }
+
+    // Resolve symlinks (on existing path or existing ancestor) so a symlinked parent
+    // cannot smuggle a critical OS path under an innocent prefix.
+    if let Some(canonical) = canonicalize_with_ancestor(&normalized) {
+        let (canon_crit, canon_reason) = check_path_against_rules(&canonical);
+        if canon_crit {
+            return (canon_crit, canon_reason);
+        }
     }
     (false, None)
+}
+
+fn canonicalize_with_ancestor(path: &Path) -> Option<PathBuf> {
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return Some(canon);
+    }
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = Some(path);
+    while let Some(p) = cur {
+        if let Ok(canon_parent) = std::fs::canonicalize(p) {
+            let mut full = canon_parent;
+            for part in suffix.into_iter().rev() {
+                full.push(part);
+            }
+            return Some(full);
+        }
+        if let Some(name) = p.file_name() {
+            suffix.push(name.to_os_string());
+        } else {
+            break;
+        }
+        cur = p.parent();
+    }
+    None
 }
 
 fn check_path_against_rules(path: &Path) -> (bool, Option<&'static str>) {

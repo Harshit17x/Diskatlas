@@ -66,17 +66,24 @@ export const TreemapChart: React.FC<TreemapProps> = ({
 
   useEffect(() => {
     if (!containerRef.current) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const w = entry.contentRect.width;
         const h = Math.max(entry.contentRect.height, 480);
         if (w > 0) {
-          setDimensions({ width: w, height: h });
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(() => {
+            setDimensions({ width: w, height: h });
+          }, 100);
         }
       }
     });
     observer.observe(containerRef.current);
-    return () => observer.disconnect();
+    return () => {
+      if (timer) clearTimeout(timer);
+      observer.disconnect();
+    };
   }, []);
 
   useEffect(() => {
@@ -122,7 +129,7 @@ export const TreemapChart: React.FC<TreemapProps> = ({
       .attr('transform', (d) => `translate(${d.x0},${d.y0})`)
       .attr('class', 'cursor-pointer select-none transition-opacity')
       .on('click', (_event, d) => {
-        if (d.data.isDirectory && d.data.path !== data.path) {
+        if (d.data.isDirectory && !d.data.isSynthetic && d.data.path !== data.path) {
           onDrillDown(d.data.path);
         }
       })
@@ -204,7 +211,7 @@ export const TreemapChart: React.FC<TreemapProps> = ({
   return (
     <div className="space-y-2">
       {/* 1. Chart Toolbar & Breadcrumbs */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2 bg-[#131518] border border-border rounded-lg text-xs">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2 bg-panel border border-border rounded-lg text-xs">
         {/* Clickable Breadcrumbs */}
         <div className="flex items-center gap-1 overflow-x-auto py-0.5 text-secondary font-mono text-[11px] max-w-xl">
           <button
@@ -217,7 +224,7 @@ export const TreemapChart: React.FC<TreemapProps> = ({
 
           {breadcrumbs.map((crumb, idx) => {
             const isLast = idx === breadcrumbs.length - 1;
-            const label = crumb.split('/').filter(Boolean).pop() || crumb;
+            const label = crumb.split(/[/\\]/).filter(Boolean).pop() || crumb;
             return (
               <React.Fragment key={crumb}>
                 <ChevronRight className="w-3 h-3 text-muted shrink-0" />
@@ -247,7 +254,7 @@ export const TreemapChart: React.FC<TreemapProps> = ({
                 className={`px-1.5 py-0.5 rounded text-[10px] font-mono transition-colors ${
                   maxDepth === d
                     ? 'bg-accent text-white font-semibold'
-                    : 'bg-elevated text-secondary hover:text-primary hover:bg-[#282D35]'
+                    : 'bg-elevated text-secondary hover:text-primary hover:bg-elevated/80'
                 }`}
               >
                 {d}L
@@ -288,7 +295,7 @@ export const TreemapChart: React.FC<TreemapProps> = ({
         {/* Hover Tooltip Overlay */}
         {tooltip && tooltip.visible && (
           <div
-            className="absolute pointer-events-none z-50 bg-[#16181D] border border-border shadow-xl rounded px-3 py-2 text-xs space-y-1 font-sans transition-all"
+            className="absolute pointer-events-none z-50 bg-panel border border-border shadow-xl rounded px-3 py-2 text-xs space-y-1 font-sans transition-all"
             style={{
               left: Math.min(tooltip.x, (containerRef.current?.clientWidth || 600) - 220),
               top: Math.min(tooltip.y, (containerRef.current?.clientHeight || 400) - 100),

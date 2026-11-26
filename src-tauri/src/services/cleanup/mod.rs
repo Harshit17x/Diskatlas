@@ -17,17 +17,29 @@ pub struct CleanupService;
 
 impl CleanupService {
     /// Constructs a transparent, user-controlled cleanup plan from active recommendations
-    pub fn get_cleanup_plan(conn: &Connection, session_id: &str) -> Result<CleanupPlan> {
-        // Ensure recommendations exist for this session
+    pub fn get_cleanup_plan(conn: &Connection, session_id: Option<&str>) -> Result<CleanupPlan> {
+        let sid = crate::storage::resolve_session_id(conn, session_id)?;
+
+        // Ensure recommendations exist for this session when indexed files/dirs are present
         let existing_count: i64 = conn.query_row(
             "SELECT count(*) FROM storage_recommendations WHERE session_id = ?1",
-            [session_id],
+            [&sid],
             |row| row.get(0),
         ).unwrap_or(0);
 
         if existing_count == 0 {
-            info!("No existing recommendations for session {}, generating intelligence profile", session_id);
-            let _ = IntelligenceService::generate_intelligence_profile(conn, Some(session_id))?;
+            let has_indexed_items: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM files WHERE session_id = ?1)
+                     OR EXISTS(SELECT 1 FROM directories WHERE session_id = ?1)",
+                    [&sid],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if has_indexed_items {
+                info!("No existing recommendations for session {}, generating intelligence profile", sid);
+                let _ = IntelligenceService::generate_intelligence_profile(conn, Some(&sid))?;
+            }
         }
 
         let mut stmt = conn.prepare(
@@ -38,7 +50,7 @@ impl CleanupService {
              ORDER BY size_bytes DESC",
         )?;
 
-        let rows = stmt.query_map([session_id], |row| {
+        let rows = stmt.query_map([&sid], |row| {
             let id: String = row.get(0)?;
             let _sid: String = row.get(1)?;
             let path: String = row.get(2)?;
@@ -147,7 +159,7 @@ impl CleanupService {
 
         Ok(CleanupPlan {
             batch_id,
-            session_id: session_id.to_string(),
+            session_id: sid,
             candidates,
             total_items,
             total_bytes,
@@ -184,6 +196,7 @@ impl CleanupService {
             ));
         }
 
+        let audit_session_id = Self::existing_session_id(conn, &request.session_id);
         let mut results = Vec::new();
         let mut successful_count = 0usize;
         let mut failed_count = 0usize;
@@ -229,7 +242,7 @@ impl CleanupService {
                 Self::log_audit_event(
                     conn,
                     &request.batch_id,
-                    Some(&request.session_id),
+                    audit_session_id.as_deref(),
                     &path,
                     &name,
                     size_bytes,
@@ -261,7 +274,7 @@ impl CleanupService {
                 Self::log_audit_event(
                     conn,
                     &request.batch_id,
-                    Some(&request.session_id),
+                    audit_session_id.as_deref(),
                     &path,
                     &name,
                     size_bytes,
@@ -287,193 +300,107 @@ impl CleanupService {
                 continue;
             }
 
-            // 3. Perform cleanup operation (preferring reversible Recycle Bin / Trash)
-            if request.use_recycle_bin {
-                match trash::delete(path_obj) {
-                    Ok(()) => {
-                        info!("Successfully sent to Recycle Bin / Trash: {}", path);
-                        Self::log_audit_event(
-                            conn,
-                            &request.batch_id,
-                            Some(&request.session_id),
-                            &path,
-                            &name,
-                            size_bytes,
-                            &category,
-                            &risk_level,
-                            "recycle_bin",
-                            "success",
-                            true,
-                            None,
-                        )?;
-
-                        results.push(CleanupOperationResult {
-                            id: item_id.clone(),
-                            path: path.clone(),
-                            name,
-                            size_bytes,
-                            status: "success".to_string(),
-                            cleanup_method: "recycle_bin".to_string(),
-                            is_reversible: true,
-                            error_message: None,
-                        });
-                        successful_count += 1;
-                        bytes_reclaimed += size_bytes;
-
-                        // Delete from active recommendations table and synchronise files/directories index
-                        let _ = conn.execute("DELETE FROM storage_recommendations WHERE id = ?1", [item_id]);
-                        let path_child_pattern = format!("{}/%", path.trim_end_matches('/'));
-                        let _ = conn.execute(
-                            "DELETE FROM files WHERE session_id = ?1 AND (path = ?2 OR path LIKE ?3)",
-                            params![&request.session_id, &path, &path_child_pattern],
-                        );
-                        let _ = conn.execute(
-                            "DELETE FROM directories WHERE session_id = ?1 AND (path = ?2 OR path LIKE ?3)",
-                            params![&request.session_id, &path, &path_child_pattern],
-                        );
-                    }
-                    Err(e) => {
-                        let err_str = e.to_string();
-                        let status = if err_str.to_lowercase().contains("permission") || err_str.to_lowercase().contains("access") {
-                            "permission_denied"
-                        } else if err_str.to_lowercase().contains("in use") || err_str.to_lowercase().contains("busy") || err_str.to_lowercase().contains("sharing") {
-                            "in_use"
-                        } else {
-                            "failed"
-                        };
-
-                        warn!("Recycle bin error for {}: {}", path, err_str);
-                        Self::log_audit_event(
-                            conn,
-                            &request.batch_id,
-                            Some(&request.session_id),
-                            &path,
-                            &name,
-                            size_bytes,
-                            &category,
-                            &risk_level,
-                            "recycle_bin",
-                            status,
-                            true,
-                            Some(&err_str),
-                        )?;
-
-                        results.push(CleanupOperationResult {
-                            id: item_id.clone(),
-                            path,
-                            name,
-                            size_bytes,
-                            status: status.to_string(),
-                            cleanup_method: "recycle_bin".to_string(),
-                            is_reversible: true,
-                            error_message: Some(err_str),
-                        });
-                        failed_count += 1;
-                    }
-                }
-            } else {
-                // Permanent deletion fallback (only when user explicitly opted out of recycle bin)
-                let is_symlink = std::fs::symlink_metadata(path_obj)
-                    .map(|m| m.file_type().is_symlink())
-                    .unwrap_or(false);
-
-                let delete_res = if is_symlink {
-                    #[cfg(target_os = "windows")]
-                    {
-                        // On Windows, directory junctions and directory symlinks are unlinked via remove_dir
-                        if path_obj.is_dir() {
-                            std::fs::remove_dir(path_obj)
-                        } else {
-                            std::fs::remove_file(path_obj)
-                        }
-                    }
-                    #[cfg(not(target_os = "windows"))]
-                    {
-                        std::fs::remove_file(path_obj)
-                    }
-                } else if path_obj.is_dir() {
-                    std::fs::remove_dir_all(path_obj)
+            // 3. Perform deletion (preferring reversible Recycle Bin / Trash)
+            let op_res: std::result::Result<(&str, bool), (&str, bool, &str, String)> =
+                if request.use_recycle_bin {
+                    trash::delete(path_obj)
+                        .map(|_| ("recycle_bin", true))
+                        .map_err(|e| {
+                            let err_str = e.to_string();
+                            let lower = err_str.to_lowercase();
+                            let status = if lower.contains("permission") || lower.contains("access") {
+                                "permission_denied"
+                            } else if lower.contains("in use")
+                                || lower.contains("busy")
+                                || lower.contains("sharing")
+                            {
+                                "in_use"
+                            } else {
+                                "failed"
+                            };
+                            ("recycle_bin", true, status, err_str)
+                        })
                 } else {
-                    std::fs::remove_file(path_obj)
+                    Self::permanently_delete_path(path_obj)
+                        .map(|_| ("permanent_delete", false))
+                        .map_err(|e| {
+                            let status = match e.kind() {
+                                std::io::ErrorKind::PermissionDenied => "permission_denied",
+                                std::io::ErrorKind::NotFound => "not_found",
+                                _ => "failed",
+                            };
+                            ("permanent_delete", false, status, e.to_string())
+                        })
                 };
 
-                match delete_res {
-                    Ok(()) => {
-                        info!("Permanently deleted item: {}", path);
-                        Self::log_audit_event(
-                            conn,
-                            &request.batch_id,
-                            Some(&request.session_id),
-                            &path,
-                            &name,
-                            size_bytes,
-                            &category,
-                            &risk_level,
-                            "permanent_delete",
-                            "success",
-                            false,
-                            None,
-                        )?;
+            match op_res {
+                Ok((method, is_reversible)) => {
+                    info!(method = method, path = %path, "Cleanup deletion succeeded");
+                    Self::log_audit_event(
+                        conn,
+                        &request.batch_id,
+                        audit_session_id.as_deref(),
+                        &path,
+                        &name,
+                        size_bytes,
+                        &category,
+                        &risk_level,
+                        method,
+                        "success",
+                        is_reversible,
+                        None,
+                    )?;
 
-                        results.push(CleanupOperationResult {
-                            id: item_id.clone(),
-                            path: path.clone(),
-                            name,
-                            size_bytes,
-                            status: "success".to_string(),
-                            cleanup_method: "permanent_delete".to_string(),
-                            is_reversible: false,
-                            error_message: None,
-                        });
-                        successful_count += 1;
-                        bytes_reclaimed += size_bytes;
+                    results.push(CleanupOperationResult {
+                        id: item_id.clone(),
+                        path: path.clone(),
+                        name,
+                        size_bytes,
+                        status: "success".to_string(),
+                        cleanup_method: method.to_string(),
+                        is_reversible,
+                        error_message: None,
+                    });
+                    successful_count += 1;
+                    bytes_reclaimed += size_bytes;
 
-                        let _ = conn.execute("DELETE FROM storage_recommendations WHERE id = ?1", [item_id]);
-                        let path_child_pattern = format!("{}/%", path.trim_end_matches('/'));
-                        let _ = conn.execute(
-                            "DELETE FROM files WHERE session_id = ?1 AND (path = ?2 OR path LIKE ?3)",
-                            params![&request.session_id, &path, &path_child_pattern],
-                        );
-                        let _ = conn.execute(
-                            "DELETE FROM directories WHERE session_id = ?1 AND (path = ?2 OR path LIKE ?3)",
-                            params![&request.session_id, &path, &path_child_pattern],
-                        );
+                    if let Err(e) = Self::record_deleted_path_in_db(
+                        conn,
+                        audit_session_id.as_deref(),
+                        item_id,
+                        &path,
+                    ) {
+                        warn!(path = %path, error = %e, "Failed to update DB rollups after cleanup");
                     }
-                    Err(e) => {
-                        let err_str = e.to_string();
-                        let status = match e.kind() {
-                            std::io::ErrorKind::PermissionDenied => "permission_denied",
-                            std::io::ErrorKind::NotFound => "not_found",
-                            _ => "failed",
-                        };
+                }
+                Err((method, is_reversible, status, err_str)) => {
+                    warn!(method = method, path = %path, error = %err_str, "Cleanup deletion failed");
+                    Self::log_audit_event(
+                        conn,
+                        &request.batch_id,
+                        audit_session_id.as_deref(),
+                        &path,
+                        &name,
+                        size_bytes,
+                        &category,
+                        &risk_level,
+                        method,
+                        status,
+                        is_reversible,
+                        Some(&err_str),
+                    )?;
 
-                        Self::log_audit_event(
-                            conn,
-                            &request.batch_id,
-                            Some(&request.session_id),
-                            &path,
-                            &name,
-                            size_bytes,
-                            &category,
-                            &risk_level,
-                            "permanent_delete",
-                            status,
-                            false,
-                            Some(&err_str),
-                        )?;
-
-                        results.push(CleanupOperationResult {
-                            id: item_id.clone(),
-                            path,
-                            name,
-                            size_bytes,
-                            status: status.to_string(),
-                            cleanup_method: "permanent_delete".to_string(),
-                            is_reversible: false,
-                            error_message: Some(err_str),
-                        });
-                        failed_count += 1;
-                    }
+                    results.push(CleanupOperationResult {
+                        id: item_id.clone(),
+                        path,
+                        name,
+                        size_bytes,
+                        status: status.to_string(),
+                        cleanup_method: method.to_string(),
+                        is_reversible,
+                        error_message: Some(err_str),
+                    });
+                    failed_count += 1;
                 }
             }
         }
@@ -486,6 +413,244 @@ impl CleanupService {
             bytes_reclaimed,
             results,
         })
+    }
+
+    fn existing_session_id(conn: &Connection, session_id: &str) -> Option<String> {
+        let trimmed = session_id.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM scan_sessions WHERE id = ?1)",
+                [trimmed],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if exists {
+            Some(trimmed.to_string())
+        } else {
+            None
+        }
+    }
+
+    fn permanently_delete_path(path_obj: &Path) -> std::io::Result<()> {
+        let is_symlink = std::fs::symlink_metadata(path_obj)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+
+        if is_symlink {
+            #[cfg(target_os = "windows")]
+            {
+                if path_obj.is_dir() {
+                    std::fs::remove_dir(path_obj)
+                } else {
+                    std::fs::remove_file(path_obj)
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                std::fs::remove_file(path_obj)
+            }
+        } else if path_obj.is_dir() {
+            std::fs::remove_dir_all(path_obj)
+        } else {
+            std::fs::remove_file(path_obj)
+        }
+    }
+
+    /// Atomically removes deleted items from recommendations/files/directories/file_hashes
+    /// and rolls back counts on `scan_sessions`, ancestor `directories`, `category_summaries`,
+    /// and `classification_summaries`.
+    fn record_deleted_path_in_db(
+        conn: &Connection,
+        session_id: Option<&str>,
+        item_id: &str,
+        path: &str,
+    ) -> Result<()> {
+        let child_pattern = crate::storage::child_like_pattern(path);
+        let escaped_path = crate::storage::escape_like_pattern(path);
+
+        let tx = conn.unchecked_transaction()?;
+
+        // Always remove recommendation and cached file hashes regardless of session presence.
+        tx.execute(
+            "DELETE FROM storage_recommendations WHERE id = ?1 OR path = ?2 OR path LIKE ?3 ESCAPE '\\'",
+            params![item_id, path, &child_pattern],
+        )?;
+        tx.execute(
+            "DELETE FROM file_hashes WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+            params![path, &child_pattern],
+        )?;
+
+        if let Some(sid) = session_id {
+            let (removed_files, removed_bytes): (i64, i64) = tx.query_row(
+                "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)
+                 FROM files
+                 WHERE session_id = ?1 AND (path = ?2 OR path LIKE ?3 ESCAPE '\\')",
+                params![sid, path, &child_pattern],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+
+            let removed_dirs: i64 = tx.query_row(
+                "SELECT COUNT(*)
+                 FROM directories
+                 WHERE session_id = ?1 AND (path = ?2 OR path LIKE ?3 ESCAPE '\\')",
+                params![sid, path, &child_pattern],
+                |row| row.get(0),
+            )?;
+
+            let deleted_dir_parent: Option<String> = tx
+                .query_row(
+                    "SELECT parent_path FROM directories WHERE session_id = ?1 AND path = ?2",
+                    params![sid, path],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
+
+            // Capture per-category & per-classification rollups before deleting file rows
+            let mut cat_deltas: Vec<(String, i64, i64)> = Vec::new();
+            {
+                let mut stmt = tx.prepare(
+                    "SELECT COALESCE(NULLIF(category, ''), 'unknown'), COUNT(*), COALESCE(SUM(size_bytes), 0)
+                     FROM files
+                     WHERE session_id = ?1 AND (path = ?2 OR path LIKE ?3 ESCAPE '\\')
+                     GROUP BY COALESCE(NULLIF(category, ''), 'unknown')",
+                )?;
+                let rows = stmt.query_map(params![sid, path, &child_pattern], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?;
+                for r in rows {
+                    cat_deltas.push(r?);
+                }
+            }
+
+            let mut class_deltas: Vec<(String, Option<String>, Option<String>, i64, i64)> =
+                Vec::new();
+            {
+                let mut stmt = tx.prepare(
+                    "SELECT COALESCE(NULLIF(category, ''), 'unknown'), subcategory, app_name, COUNT(*), COALESCE(SUM(size_bytes), 0)
+                     FROM files
+                     WHERE session_id = ?1 AND (path = ?2 OR path LIKE ?3 ESCAPE '\\')
+                     GROUP BY COALESCE(NULLIF(category, ''), 'unknown'), subcategory, app_name",
+                )?;
+                let rows = stmt.query_map(params![sid, path, &child_pattern], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                })?;
+                for r in rows {
+                    class_deltas.push(r?);
+                }
+            }
+
+            let mut parent_buckets: Vec<(String, i64, i64)> = Vec::new();
+            {
+                let mut stmt = tx.prepare(
+                    "SELECT parent_path, COUNT(*), COALESCE(SUM(size_bytes), 0)
+                     FROM files
+                     WHERE session_id = ?1 AND (path = ?2 OR path LIKE ?3 ESCAPE '\\')
+                     GROUP BY parent_path",
+                )?;
+                let rows = stmt.query_map(params![sid, path, &child_pattern], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?;
+                for r in rows {
+                    parent_buckets.push(r?);
+                }
+            }
+
+            tx.execute(
+                "DELETE FROM files WHERE session_id = ?1 AND (path = ?2 OR path LIKE ?3 ESCAPE '\\')",
+                params![sid, path, &child_pattern],
+            )?;
+            tx.execute(
+                "DELETE FROM directories WHERE session_id = ?1 AND (path = ?2 OR path LIKE ?3 ESCAPE '\\')",
+                params![sid, path, &child_pattern],
+            )?;
+
+            if removed_files > 0 || removed_bytes > 0 || removed_dirs > 0 {
+                tx.execute(
+                    "UPDATE scan_sessions
+                     SET total_files = MAX(0, total_files - ?1),
+                         total_bytes = MAX(0, total_bytes - ?2),
+                         total_directories = MAX(0, total_directories - ?3)
+                     WHERE id = ?4",
+                    params![removed_files, removed_bytes, removed_dirs, sid],
+                )?;
+            }
+
+            for (cat, cnt, bytes) in cat_deltas {
+                tx.execute(
+                    "UPDATE category_summaries
+                     SET file_count = MAX(0, file_count - ?1),
+                         total_bytes = MAX(0, total_bytes - ?2)
+                     WHERE session_id = ?3 AND category = ?4",
+                    params![cnt, bytes, sid, cat],
+                )?;
+            }
+            tx.execute(
+                "DELETE FROM category_summaries WHERE session_id = ?1 AND file_count <= 0 AND total_bytes <= 0",
+                [sid],
+            )?;
+
+            for (cat, subcat, app_name, cnt, bytes) in class_deltas {
+                tx.execute(
+                    "UPDATE classification_summaries
+                     SET file_count = MAX(0, file_count - ?1),
+                         total_bytes = MAX(0, total_bytes - ?2)
+                     WHERE session_id = ?3 AND category = ?4 AND subcategory IS ?5 AND app_name IS ?6",
+                    params![cnt, bytes, sid, cat, subcat, app_name],
+                )?;
+            }
+            tx.execute(
+                "DELETE FROM classification_summaries WHERE session_id = ?1 AND file_count <= 0 AND total_bytes <= 0",
+                [sid],
+            )?;
+
+            if let Some(parent_dir) = deleted_dir_parent {
+                tx.execute(
+                    "UPDATE directories
+                     SET dir_count = MAX(0, dir_count - 1)
+                     WHERE session_id = ?1 AND path = ?2",
+                    params![sid, parent_dir],
+                )?;
+            }
+
+            // Walk upward from each deleted file's parent_path through surviving ancestor directories.
+            for (mut cur_parent, cnt, bytes) in parent_buckets {
+                let mut hops = 0usize;
+                let mut prev = String::new();
+                while hops < 128 && cur_parent != prev {
+                    tx.execute(
+                        "UPDATE directories
+                         SET file_count = MAX(0, file_count - ?1),
+                             total_size_bytes = MAX(0, total_size_bytes - ?2)
+                         WHERE session_id = ?3 AND path = ?4",
+                        params![cnt, bytes, sid, &cur_parent],
+                    )?;
+
+                    let next_parent: Option<String> = tx
+                        .query_row(
+                            "SELECT parent_path FROM directories WHERE session_id = ?1 AND path = ?2",
+                            params![sid, &cur_parent],
+                            |row| row.get(0),
+                        )
+                        .ok()
+                        .flatten();
+
+                    prev = cur_parent;
+                    match next_parent {
+                        Some(p) if !p.is_empty() => cur_parent = p,
+                        _ => break,
+                    }
+                    hops += 1;
+                }
+            }
+        }
+
+        let _ = escaped_path;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Records an individual cleanup action into the persistent audit history table
@@ -718,7 +883,7 @@ mod tests {
         ).unwrap();
 
         // 3. Test get_cleanup_plan
-        let plan = CleanupService::get_cleanup_plan(&conn, session_id).unwrap();
+        let plan = CleanupService::get_cleanup_plan(&conn, Some(session_id)).unwrap();
         assert_eq!(plan.total_items, 2);
         assert_eq!(plan.blocked_items, 1);
 
@@ -776,6 +941,119 @@ mod tests {
         assert_eq!(audit.total_items, 2); // 1 blocked_security, 1 success
 
         // Clean up test dir
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_cleanup_updates_session_directory_and_summary_rollups() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrator::run(&mut conn).unwrap();
+
+        let temp_dir = std::env::temp_dir().join(format!("diskatlas_rollup_{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let target_file = temp_dir.join("old_100%_archive.zip");
+        {
+            let mut f = File::create(&target_file).unwrap();
+            f.write_all(b"rollup test payload").unwrap();
+        }
+        let f_size = fs::metadata(&target_file).unwrap().len() as i64;
+        let temp_str = temp_dir.to_string_lossy().to_string();
+        let file_str = target_file.to_string_lossy().to_string();
+
+        conn.execute(
+            "INSERT INTO drives (id, label, mount_point, filesystem, total_bytes, available_bytes)
+             VALUES ('D_ROLLUP', 'Test', '/tmp', 'apfs', 10000, 5000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scan_sessions (id, drive_id, root_path, status, total_files, total_directories, total_bytes, started_at)
+             VALUES ('sess-rollup', 'D_ROLLUP', ?1, 'completed', 2, 1, ?2, CURRENT_TIMESTAMP)",
+            params![&temp_str, f_size + 50],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO directories (session_id, path, name, parent_path, total_size_bytes, file_count, dir_count)
+             VALUES ('sess-rollup', ?1, 'temp', NULL, ?2, 2, 0)",
+            params![&temp_str, f_size + 50],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files (session_id, path, name, extension, parent_path, size_bytes, category, confidence)
+             VALUES ('sess-rollup', ?1, 'old_100%_archive.zip', 'zip', ?2, ?3, 'archives', 0.9),
+                    ('sess-rollup', ?4, 'keep.txt', 'txt', ?2, 50, 'documents', 0.9)",
+            params![&file_str, &temp_str, f_size, format!("{}/keep.txt", temp_str)],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO category_summaries (session_id, category, file_count, total_bytes)
+             VALUES ('sess-rollup', 'archives', 1, ?1), ('sess-rollup', 'documents', 1, 50)",
+            [f_size],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO file_hashes (path, size_bytes, modified_at, sha256)
+             VALUES (?1, ?2, 0, 'deadbeef')",
+            params![&file_str, f_size],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO storage_recommendations
+             (id, session_id, path, name, size_bytes, category, rec_group, risk_level,
+              reason, confidence, recoverable_bytes, expected_consequences, recommended_action)
+             VALUES ('rec-rollup-1', 'sess-rollup', ?1, 'old_100%_archive.zip', ?2, 'archives',
+                     'safe_to_review', 'low', 'Old archive', 0.95, ?2, 'Reclaimable', 'Delete')",
+            params![&file_str, f_size],
+        )
+        .unwrap();
+
+        let res = CleanupService::execute_cleanup(
+            &conn,
+            ExecuteCleanupRequest {
+                batch_id: "batch-rollup".to_string(),
+                session_id: "sess-rollup".to_string(),
+                item_ids: vec!["rec-rollup-1".to_string()],
+                use_recycle_bin: false,
+                confirmation_phrase: "CONFIRM_CLEANUP".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(res.successful_count, 1);
+
+        let (rem_files, rem_bytes): (i64, i64) = conn
+            .query_row(
+                "SELECT total_files, total_bytes FROM scan_sessions WHERE id = 'sess-rollup'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(rem_files, 1);
+        assert_eq!(rem_bytes, 50);
+
+        let (dir_files, dir_bytes): (i64, i64) = conn
+            .query_row(
+                "SELECT file_count, total_size_bytes FROM directories WHERE session_id = 'sess-rollup' AND path = ?1",
+                [&temp_str],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(dir_files, 1);
+        assert_eq!(dir_bytes, 50);
+
+        let arch_cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM category_summaries WHERE session_id = 'sess-rollup' AND category = 'archives'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(arch_cnt, 0);
+
+        let hash_cnt: i64 = conn
+            .query_row("SELECT COUNT(*) FROM file_hashes WHERE path = ?1", [&file_str], |r| r.get(0))
+            .unwrap();
+        assert_eq!(hash_cnt, 0);
+
         let _ = fs::remove_dir_all(&temp_dir);
     }
 }

@@ -72,7 +72,7 @@ export const DuplicateFinderView: React.FC = () => {
           <select
             value={selectedSessionId || ''}
             onChange={(e) => handleSessionChange(e.target.value)}
-            className="bg-[#15171B] border border-border rounded px-2.5 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
+            className="bg-panel border border-border rounded px-2.5 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
           >
             <option value="">Latest Completed Scan</option>
             {sessionsPage?.items.map((s) => (
@@ -105,7 +105,7 @@ export const DuplicateFinderView: React.FC = () => {
       </div>
 
       {/* 2. Engineering & Methodology Principles */}
-      <div className="p-3 bg-[#16181C] border border-border rounded flex items-start gap-2.5 text-xs text-secondary">
+      <div className="p-3 bg-panel border border-border rounded flex items-start gap-2.5 text-xs text-secondary">
         <ShieldCheck className="w-4 h-4 text-accent shrink-0 mt-0.5" />
         <div className="space-y-1 text-[11px] leading-relaxed">
           <span className="font-semibold text-primary block">Staged Verification Methodology:</span>
@@ -169,7 +169,7 @@ export const DuplicateFinderView: React.FC = () => {
                 className={`px-2 py-0.5 rounded text-[11px] font-mono transition-colors ${
                   duplicateQuery.minSizeBytes === p.bytes
                     ? 'bg-accent text-white font-semibold'
-                    : 'bg-elevated text-secondary hover:text-primary hover:bg-[#282D35]'
+                    : 'bg-elevated text-secondary hover:text-primary hover:bg-elevated/80'
                 }`}
               >
                 {p.label}
@@ -189,7 +189,7 @@ export const DuplicateFinderView: React.FC = () => {
                   searchDuplicates();
                 }
               }}
-              className="bg-[#15171B] border border-border rounded px-2 py-0.5 text-xs text-primary font-mono placeholder-muted focus:outline-none focus:border-accent w-32"
+              className="bg-panel border border-border rounded px-2 py-0.5 text-xs text-primary font-mono placeholder-muted focus:outline-none focus:border-accent w-32"
             />
           </div>
         </div>
@@ -293,7 +293,7 @@ export const DuplicateFinderView: React.FC = () => {
 
                   {/* Expanded Duplicate File Paths */}
                   {isExpanded && (
-                    <div className="border-t border-border bg-[#131518] p-3 space-y-2">
+                    <div className="border-t border-border bg-canvas/40 p-3 space-y-2">
                       <div className="text-[11px] font-semibold text-secondary px-1 flex items-center justify-between">
                         <span>Physical File Locations ({group.files.length})</span>
                         <span className="text-[10px] text-muted italic">Non-destructive view • No deletion executed</span>

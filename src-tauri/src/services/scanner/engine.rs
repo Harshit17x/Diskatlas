@@ -1,11 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::error::Result;
 use crate::models::scan::{ScanProgress, ScanStatus, ScanSummary};
@@ -85,7 +85,7 @@ impl ScanEngine {
     pub fn run_scan(
         options: ScanOptions,
         status: Arc<AtomicU8>,
-        _pause_notify: Arc<tokio::sync::Notify>,
+        pause_signal: Arc<(Mutex<()>, Condvar)>,
         progress: Arc<Mutex<ScanProgress>>,
         db_pool: DbPool,
         app_handle: Option<AppHandle>,
@@ -99,8 +99,7 @@ impl ScanEngine {
 
         // Ensure drive record exists in drives table to satisfy foreign key constraint
         {
-            let conn_arc = db_pool.conn();
-            let conn = conn_arc.lock().unwrap();
+            let conn = db_pool.lock_conn();
             let root_str = options.root_path.to_string_lossy().to_string();
             let _ = conn.execute(
                 "INSERT INTO drives (id, label, mount_point, filesystem, total_bytes, available_bytes, is_removable, is_system)
@@ -261,6 +260,7 @@ impl ScanEngine {
                 // Perform bottom-up rollup on whatever was scanned so far before flushing
                 Self::rollup_and_flush_directories(&db_pool, &options.session_id, &mut dir_map, options.batch_size, &options.root_path)?;
                 Self::flush_batches(&db_pool, &options.session_id, &mut file_batch, &mut dir_batch, &mut error_batch)?;
+                Self::ensure_root_directory_row(&db_pool, &options.session_id, &options.root_path, files_scanned, dirs_scanned, bytes_scanned)?;
                 Self::update_session_status(&db_pool, &options.session_id, ScanStatus::Cancelled, files_scanned, dirs_scanned, bytes_scanned, error_count)?;
                 return Ok(ScanSummary {
                     session_id: options.session_id,
@@ -275,10 +275,37 @@ impl ScanEngine {
                 });
             }
 
-            // Check pause — poll atomically on the dedicated OS thread
-            while status.load(Ordering::SeqCst) == STATUS_PAUSED {
-                debug!("Scan session '{}' paused, sleeping...", options.session_id);
-                std::thread::sleep(Duration::from_millis(50));
+            // Check pause — wait cleanly on condvar until resumed or cancelled
+            if status.load(Ordering::SeqCst) == STATUS_PAUSED {
+                let (lock, cvar) = &*pause_signal;
+                let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                while status.load(Ordering::SeqCst) == STATUS_PAUSED {
+                    debug!("Scan session '{}' paused, waiting...", options.session_id);
+                    guard = cvar
+                        .wait_timeout(guard, Duration::from_millis(200))
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0;
+                }
+            }
+
+            // Re-check cancellation immediately after waking from pause
+            if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
+                info!("Scan session '{}' cancelled by user", options.session_id);
+                Self::rollup_and_flush_directories(&db_pool, &options.session_id, &mut dir_map, options.batch_size, &options.root_path)?;
+                Self::flush_batches(&db_pool, &options.session_id, &mut file_batch, &mut dir_batch, &mut error_batch)?;
+                Self::ensure_root_directory_row(&db_pool, &options.session_id, &options.root_path, files_scanned, dirs_scanned, bytes_scanned)?;
+                Self::update_session_status(&db_pool, &options.session_id, ScanStatus::Cancelled, files_scanned, dirs_scanned, bytes_scanned, error_count)?;
+                return Ok(ScanSummary {
+                    session_id: options.session_id,
+                    drive_id: options.drive_id,
+                    root_path: options.root_path.to_string_lossy().to_string(),
+                    status: ScanStatus::Cancelled,
+                    total_files: files_scanned,
+                    total_dirs: dirs_scanned,
+                    total_bytes: bytes_scanned,
+                    error_count,
+                    duration_millis: start_time.elapsed().as_millis() as u64,
+                });
             }
 
             // Check system internal boundary exclusions (e.g. /System/Volumes firmlinks, /Volumes external mounts, /dev)
@@ -639,6 +666,91 @@ impl ScanEngine {
             ScanStatus::Completed
         };
 
+        // Helper closure to emit stage progress updates during post-scan enrichment
+        let emit_stage = |msg: &str| {
+            if let Ok(mut p) = progress.lock() {
+                p.current_path = msg.to_string();
+                p.current_file = None;
+                p.elapsed_millis = start_time.elapsed().as_millis() as u64;
+            }
+            if let Some(ref handle) = app_handle {
+                if let Ok(p_snap) = progress.lock() {
+                    handle.emit("scan://progress", &*p_snap).ok();
+                }
+            }
+        };
+
+        // Automated post-scan intelligence pipeline (with cancel checks & error logging):
+        // 1. Storage Classification Summaries
+        if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
+            Self::update_session_status(&db_pool, &options.session_id, ScanStatus::Cancelled, files_scanned, dirs_scanned, bytes_scanned, error_count)?;
+            return Ok(ScanSummary {
+                session_id: options.session_id,
+                drive_id: options.drive_id,
+                root_path: options.root_path.to_string_lossy().to_string(),
+                status: ScanStatus::Cancelled,
+                total_files: files_scanned,
+                total_dirs: dirs_scanned,
+                total_bytes: bytes_scanned,
+                error_count,
+                duration_millis: start_time.elapsed().as_millis() as u64,
+            });
+        }
+
+        emit_stage("Finalizing storage classification summaries...");
+        info!("Running automated post-scan classification for session '{}'", options.session_id);
+        if let Err(err) = crate::services::classifier::ClassifierService::ensure_session_summaries(&db_pool, &options.session_id) {
+            warn!("Post-scan classification summary failed for session '{}': {}", options.session_id, err);
+        }
+
+        // 2. Developer Storage Project Attribution (DB-only; skips Docker CLI / host cache crawls)
+        if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
+            Self::update_session_status(&db_pool, &options.session_id, ScanStatus::Cancelled, files_scanned, dirs_scanned, bytes_scanned, error_count)?;
+            return Ok(ScanSummary {
+                session_id: options.session_id,
+                drive_id: options.drive_id,
+                root_path: options.root_path.to_string_lossy().to_string(),
+                status: ScanStatus::Cancelled,
+                total_files: files_scanned,
+                total_dirs: dirs_scanned,
+                total_bytes: bytes_scanned,
+                error_count,
+                duration_millis: start_time.elapsed().as_millis() as u64,
+            });
+        }
+
+        emit_stage("Profiling developer project storage...");
+        info!("Running automated developer storage discovery for session '{}'", options.session_id);
+        if let Err(err) = crate::services::developer::DeveloperService::analyze_project_storage_db(&db_pool, &options.session_id) {
+            warn!("Post-scan developer analysis failed for session '{}': {}", options.session_id, err);
+        }
+
+        // 3. Storage Intelligence Recommendations
+        if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
+            Self::update_session_status(&db_pool, &options.session_id, ScanStatus::Cancelled, files_scanned, dirs_scanned, bytes_scanned, error_count)?;
+            return Ok(ScanSummary {
+                session_id: options.session_id,
+                drive_id: options.drive_id,
+                root_path: options.root_path.to_string_lossy().to_string(),
+                status: ScanStatus::Cancelled,
+                total_files: files_scanned,
+                total_dirs: dirs_scanned,
+                total_bytes: bytes_scanned,
+                error_count,
+                duration_millis: start_time.elapsed().as_millis() as u64,
+            });
+        }
+
+        emit_stage("Generating storage intelligence recommendations...");
+        info!("Generating storage intelligence recommendations for session '{}'", options.session_id);
+        {
+            let conn = db_pool.lock_conn();
+            if let Err(err) = crate::services::intelligence::IntelligenceService::generate_intelligence_profile(&conn, Some(&options.session_id)) {
+                warn!("Post-scan intelligence generation failed for session '{}': {}", options.session_id, err);
+            }
+        }
+
+        // Persist final completion status, category summaries, and snapshot AFTER all stages finish
         Self::update_session_status(
             &db_pool,
             &options.session_id,
@@ -649,34 +761,8 @@ impl ScanEngine {
             error_count,
         )?;
 
-        // Notify frontend that traversal has finished and summaries are finalizing
-        {
-            if let Ok(mut p) = progress.lock() {
-                p.current_path = "Finalizing storage categories and summaries...".to_string();
-                p.elapsed_millis = start_time.elapsed().as_millis() as u64;
-            }
-        }
-        if let Some(ref handle) = app_handle {
-            if let Ok(p_snap) = progress.lock() {
-                handle.emit("scan://progress", &*p_snap).ok();
-            }
-        }
-
-        // Automated post-scan intelligence pipeline:
-        // 1. Storage Classification Engine
-        info!("Running automated post-scan classification for session '{}'", options.session_id);
-        let _ = crate::services::classifier::ClassifierService::classify_and_persist_session(&db_pool, &options.session_id);
-
-        // 2. Developer Storage Intelligence
-        info!("Running automated developer storage discovery for session '{}'", options.session_id);
-        let _ = crate::services::developer::DeveloperService::analyze_developer_storage(&db_pool, &options.session_id);
-
-        // 3. Storage Intelligence Recommendations
-        info!("Generating storage intelligence recommendations for session '{}'", options.session_id);
-        {
-            let conn_arc = db_pool.conn();
-            let conn = conn_arc.lock().unwrap();
-            let _ = crate::services::intelligence::IntelligenceService::generate_intelligence_profile(&conn, Some(&options.session_id));
+        if let Err(err) = db_pool.checkpoint_wal() {
+            warn!("Post-scan WAL checkpoint failed: {}", err);
         }
 
         let final_summary = ScanSummary {
@@ -693,7 +779,7 @@ impl ScanEngine {
 
         // Update progress state to completed
         {
-            let mut p = progress.lock().unwrap();
+            let mut p = progress.lock().unwrap_or_else(|e| e.into_inner());
             p.status = final_status;
             p.files_scanned = files_scanned;
             p.dirs_scanned = dirs_scanned;
@@ -727,8 +813,7 @@ impl ScanEngine {
             return Ok(());
         }
 
-        let conn_arc = db_pool.conn();
-        let mut conn = conn_arc.lock().unwrap();
+        let mut conn = db_pool.lock_conn();
         let tx = conn.transaction()?;
 
         // 1. Files
@@ -763,13 +848,20 @@ impl ScanEngine {
             }
         }
 
-        // 2. Directories
+        // 2. Directories (idempotent upsert via unique index on (session_id, path))
         if !dir_batch.is_empty() {
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO directories (
                     session_id, path, name, parent_path, file_count, dir_count,
                     total_size_bytes, created_at, modified_at, is_hidden, is_system
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                ON CONFLICT(session_id, path) DO UPDATE SET
+                    parent_path = excluded.parent_path,
+                    file_count = excluded.file_count,
+                    dir_count = excluded.dir_count,
+                    total_size_bytes = excluded.total_size_bytes,
+                    created_at = excluded.created_at,
+                    modified_at = excluded.modified_at"
             )?;
 
             for d in dir_batch.drain(..) {
@@ -814,8 +906,7 @@ impl ScanEngine {
         total_bytes: u64,
         error_count: u64,
     ) -> Result<()> {
-        let conn_arc = db_pool.conn();
-        let conn = conn_arc.lock().unwrap();
+        let conn = db_pool.lock_conn();
         conn.execute(
             "UPDATE scan_sessions SET
                 status = ?1,
@@ -835,45 +926,34 @@ impl ScanEngine {
             ),
         )?;
 
-        // Automatically aggregate category summaries and create point-in-time snapshot on completion
+        // Automatically aggregate canonical category summaries and create point-in-time snapshot on completion
         if status == ScanStatus::Completed || status == ScanStatus::CompletedWithErrors {
-            let _ = conn.execute(
-                "INSERT OR REPLACE INTO category_summaries (session_id, category, file_count, total_bytes)
+            conn.execute("DELETE FROM category_summaries WHERE session_id = ?1", [session_id])?;
+            if let Err(err) = conn.execute(
+                "INSERT INTO category_summaries (session_id, category, file_count, total_bytes)
                  SELECT
                      session_id,
-                     ext_category AS category,
+                     COALESCE(NULLIF(category, ''), 'unknown') AS cat,
                      COUNT(*) as file_count,
                      COALESCE(SUM(size_bytes), 0) as total_bytes
-                 FROM (
-                     SELECT
-                         session_id,
-                         size_bytes,
-                         CASE
-                             WHEN is_system = 1 THEN 'system'
-                             WHEN extension IN ('rs', 'ts', 'tsx', 'js', 'jsx', 'py', 'go', 'c', 'cpp', 'h', 'hpp', 'java', 'cs', 'swift', 'kt', 'html', 'css', 'scss', 'json', 'yaml', 'yml', 'toml', 'xml', 'sql', 'sh', 'bash', 'zsh', 'bat', 'ps1') THEN 'code'
-                             WHEN extension IN ('pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'md', 'csv', 'tsv', 'rtf', 'epub', 'pages', 'numbers', 'key') THEN 'documents'
-                             WHEN extension IN ('png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'bmp', 'tiff', 'psd', 'ai', 'raw', 'heic') THEN 'images'
-                             WHEN extension IN ('mp4', 'mkv', 'mov', 'avi', 'wmv', 'flv', 'webm', 'm4v', 'mpg', 'mpeg') THEN 'videos'
-                             WHEN extension IN ('mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a', 'wma', 'aiff') THEN 'audio'
-                             WHEN extension IN ('zip', 'tar', 'gz', '7z', 'rar', 'bz2', 'xz', 'iso', 'dmg', 'pkg', 'tgz') THEN 'archives'
-                             WHEN extension IN ('exe', 'dll', 'msi', 'dylib', 'so', 'app', 'bin', 'elf') THEN 'executables'
-                             ELSE 'other'
-                         END AS ext_category
-                     FROM files
-                     WHERE session_id = ?1
-                 )
-                 GROUP BY ext_category;",
+                 FROM files
+                 WHERE session_id = ?1
+                 GROUP BY session_id, COALESCE(NULLIF(category, ''), 'unknown');",
                 [session_id],
-            );
+            ) {
+                warn!("Failed aggregating category_summaries for '{}': {}", session_id, err);
+            }
 
             let snapshot_id = uuid::Uuid::new_v4().to_string();
-            let _ = conn.execute(
+            if let Err(err) = conn.execute(
                 "INSERT INTO storage_snapshots (id, session_id, drive_id, label, root_path, total_files, total_directories, total_bytes)
                  SELECT ?1, s.id, s.drive_id, 'Scan Completed', s.root_path, s.total_files, s.total_directories, s.total_bytes
                  FROM scan_sessions s
                  WHERE s.id = ?2;",
                 (&snapshot_id, session_id),
-            );
+            ) {
+                warn!("Failed inserting completion snapshot for '{}': {}", session_id, err);
+            }
         }
 
         Ok(())
@@ -881,10 +961,10 @@ impl ScanEngine {
 
     /// Performs a bottom-up directory rollup so parent folders accurately sum all their descendants,
     /// and flushes the aggregated directories to SQLite in batches.
-    fn rollup_and_flush_directories(
+    pub(crate) fn rollup_and_flush_directories(
         db_pool: &DbPool,
         session_id: &str,
-        dir_map: &mut std::collections::HashMap<String, RawDirItem>,
+        dir_map: &mut HashMap<String, RawDirItem>,
         batch_size: usize,
         root_path: &Path,
     ) -> Result<()> {
@@ -892,21 +972,16 @@ impl ScanEngine {
             return Ok(());
         }
 
-        // Repair orphaned parent links.
-        //
-        // On macOS the scanner seeds a set of firmlink roots (/opt, /usr/local, /Library,
-        // /Applications, /Users/Shared, each /Users/* profile, $HOME) instead of the literal
-        // root. Those seeds record their *real* filesystem parent (e.g. /usr/local's parent is
-        // /usr), but the intermediate parent is never itself visited, so it never gets a row.
-        // The result is a chain that cannot be walked from the root and a subtree that is
-        // invisible no matter how the user navigates.
-        //
-        // Here we (a) re-parent any directory whose parent has no row to the nearest ancestor
-        // that does have one, and (b) synthesize the root row so the tree has a real root.
+        // 1. Synthesize missing intermediate directories between seeded roots (e.g. `/Users`,
+        //    `/usr` on macOS `/` scans) and `root_path` so the directory hierarchy and
+        //    breadcrumbs stay connected without dropping branches.
         let root_str = root_path.to_string_lossy().to_string();
+        let synthesized = Self::synthesize_missing_ancestors(dir_map, &root_str);
+
+        // 2. Repair any remaining orphaned parent links to nearest known ancestor or `root_str`.
         Self::repair_orphaned_parents(dir_map, &root_str);
 
-        // Sort descending by path length so deepest paths roll up to their parents first
+        // 3. Sort descending by path length so deepest paths roll up to their parents first
         let mut dir_paths: Vec<String> = dir_map.keys().cloned().collect();
         dir_paths.sort_by(|a, b| b.len().cmp(&a.len()));
 
@@ -920,6 +995,9 @@ impl ScanEngine {
                     if let Some(parent) = dir_map.get_mut(&parent_path) {
                         parent.total_size_bytes += child_bytes;
                         parent.file_count += child_files;
+                        if synthesized.contains(&parent_path) {
+                            parent.dir_count += 1;
+                        }
                     }
                 }
             }
@@ -937,23 +1015,88 @@ impl ScanEngine {
         Ok(())
     }
 
+    fn is_strict_descendant(candidate: &str, root: &str) -> bool {
+        if candidate.is_empty() || candidate == root {
+            return false;
+        }
+        if root == "/" {
+            return candidate.starts_with('/');
+        }
+        if root.ends_with('\\') || root.ends_with('/') {
+            return candidate.starts_with(root) && candidate.len() > root.len();
+        }
+        candidate.starts_with(&format!("{}/", root)) || candidate.starts_with(&format!("{}\\", root))
+    }
+
+    fn synthesize_missing_ancestors(
+        dir_map: &mut HashMap<String, RawDirItem>,
+        root_str: &str,
+    ) -> HashSet<String> {
+        let mut synthesized = HashSet::new();
+        let initial_paths: Vec<String> = dir_map.keys().cloned().collect();
+
+        for path_str in initial_paths {
+            let mut cur = PathBuf::from(&path_str);
+            while let Some(parent) = cur.parent() {
+                let p_str = parent.to_string_lossy().to_string();
+                if p_str.is_empty() || p_str == root_str || !Self::is_strict_descendant(&p_str, root_str) {
+                    break;
+                }
+                if !dir_map.contains_key(&p_str) {
+                    let parent_of_parent = parent.parent().map(|pp| pp.to_string_lossy().to_string());
+                    let name = parent
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| p_str.clone());
+                    let (created_at, modified_at) = match fs::metadata(parent) {
+                        Ok(m) => Self::get_timestamps(&m),
+                        Err(_) => (None, None),
+                    };
+                    let is_hidden = name.starts_with('.');
+                    dir_map.insert(
+                        p_str.clone(),
+                        RawDirItem {
+                            path: p_str.clone(),
+                            name,
+                            parent_path: parent_of_parent,
+                            file_count: 0,
+                            dir_count: 0,
+                            total_size_bytes: 0,
+                            created_at,
+                            modified_at,
+                            is_hidden,
+                            is_system: false,
+                        },
+                    );
+                    synthesized.insert(p_str.clone());
+                }
+                cur = parent.to_path_buf();
+            }
+        }
+
+        synthesized
+    }
+
     /// Re-parents directories whose parent directory has no row of its own to the nearest
-    /// ancestor that does, so the whole tree remains reachable from the root.
+    /// ancestor that does (or `root_path`), so the whole tree remains reachable from the root.
     fn repair_orphaned_parents(
-        dir_map: &mut std::collections::HashMap<String, RawDirItem>,
+        dir_map: &mut HashMap<String, RawDirItem>,
         root_path: &str,
     ) {
-        // Collect the set of known paths once.
-        let known: std::collections::HashSet<String> = dir_map.keys().cloned().collect();
+        let known: HashSet<String> = dir_map.keys().cloned().collect();
 
         let orphans: Vec<(String, String)> = dir_map
             .iter()
             .filter_map(|(path, item)| {
+                if path == root_path {
+                    return None;
+                }
                 let parent = item.parent_path.clone()?;
                 if parent.is_empty() || parent == *path {
                     return None;
                 }
-                if known.contains(&parent) {
+                // If parent equals the scan root, it will link directly to the root row created by ensure_root_directory_row
+                if parent == root_path || known.contains(&parent) {
                     return None;
                 }
                 Some((path.clone(), parent))
@@ -961,12 +1104,11 @@ impl ScanEngine {
             .collect();
 
         for (path, parent) in orphans {
-            // Walk up the ancestor chain until we find one that exists as a row.
             let mut candidate = Path::new(&parent);
             let mut resolved: Option<String> = None;
             loop {
                 let cand_str = candidate.to_string_lossy().to_string();
-                if cand_str.is_empty() || cand_str == "/" {
+                if cand_str.is_empty() || cand_str == root_path {
                     break;
                 }
                 if known.contains(&cand_str) {
@@ -979,9 +1121,8 @@ impl ScanEngine {
                 }
             }
 
-            // Fall back to the scan root when no ancestor has a row.
             let new_parent = resolved.or_else(|| {
-                if root_path.is_empty() || root_path == "/" {
+                if root_path.is_empty() {
                     None
                 } else {
                     Some(root_path.to_string())
@@ -997,10 +1138,7 @@ impl ScanEngine {
     /// Writes an explicit `directories` row for the scan root so the visualization tree has
     /// a real root node with an accurate file count and a size that reconciles with the sum
     /// of its children.
-    ///
-    /// The traversal never visits the literal root (on macOS it seeds a set of firmlink
-    /// roots such as /Users, /Applications, /Library, /opt), so no row existed for it.
-    fn ensure_root_directory_row(
+    pub(crate) fn ensure_root_directory_row(
         db_pool: &DbPool,
         session_id: &str,
         root_path: &Path,
@@ -1013,8 +1151,7 @@ impl ScanEngine {
             return Ok(());
         }
 
-        let conn_arc = db_pool.conn();
-        let conn = conn_arc.lock().unwrap();
+        let conn = db_pool.lock_conn();
 
         let (created_at, modified_at) = match fs::metadata(root_path) {
             Ok(m) => Self::get_timestamps(&m),
@@ -1026,14 +1163,13 @@ impl ScanEngine {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| root_str.clone());
 
-        // The root's own metrics come from the session totals, which represent everything the
-        // scan actually observed (including the seeded roots).
         conn.execute(
             "INSERT INTO directories (
                 session_id, path, name, parent_path, file_count, dir_count,
                 total_size_bytes, created_at, modified_at, is_hidden, is_system
              ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, 0, 1)
              ON CONFLICT(session_id, path) DO UPDATE SET
+                parent_path = NULL,
                 file_count = excluded.file_count,
                 dir_count = excluded.dir_count,
                 total_size_bytes = excluded.total_size_bytes,
@@ -1156,13 +1292,24 @@ impl ScanEngine {
     }
 
     fn is_excluded(path_str: &str, exclusions: &[String]) -> bool {
-        for pattern in exclusions {
-            if pattern.contains('*') {
-                let clean_pat = pattern.replace("**", "").replace('*', "");
-                if !clean_pat.is_empty() && path_str.contains(&clean_pat) {
+        let norm_path = path_str.replace('\\', "/");
+        for raw in exclusions {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let norm_pat = trimmed.replace('\\', "/");
+            let clean_pat = norm_pat.trim_matches('*').trim_matches('/');
+            if clean_pat.is_empty() {
+                continue;
+            }
+
+            if !clean_pat.contains('/') {
+                // Single segment name (e.g. "node_modules", ".git", "**/.git/**")
+                if norm_path.split('/').any(|seg| seg.eq_ignore_ascii_case(clean_pat)) {
                     return true;
                 }
-            } else if path_str.contains(pattern) {
+            } else if norm_path.to_lowercase().contains(&clean_pat.to_lowercase()) {
                 return true;
             }
         }
@@ -1213,7 +1360,16 @@ impl ScanEngine {
             let is_hidden = name.starts_with('.');
             let path_str = path.to_string_lossy();
             let is_system = path_str.starts_with("/System")
-                || path_str.starts_with("/Library")
+                || path_str.starts_with("/Library/Apple")
+                || path_str.starts_with("/Library/Extensions")
+                || path_str.starts_with("/usr/bin")
+                || path_str.starts_with("/usr/lib")
+                || path_str.starts_with("/usr/sbin")
+                || path_str.starts_with("/usr/libexec")
+                || path_str.starts_with("/usr/standalone")
+                || path_str.starts_with("/usr/share")
+                || path_str.starts_with("/bin/")
+                || path_str.starts_with("/sbin/")
                 || path_str.starts_with("/dev")
                 || path_str.starts_with("/proc");
             (is_hidden, is_system)

@@ -75,7 +75,7 @@ export const StorageAnalyticsDashboard: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="w-full bg-[#131518] h-1.5 rounded overflow-hidden border border-border/50">
+                <div className="w-full bg-elevated h-1.5 rounded overflow-hidden border border-border/50">
                   <div
                     className="bg-accent h-full rounded transition-all"
                     style={{ width: `${Math.min(cat.percentage, 100)}%` }}
@@ -112,7 +112,7 @@ export const StorageAnalyticsDashboard: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="w-full bg-[#131518] h-1.5 rounded overflow-hidden border border-border/50">
+                <div className="w-full bg-elevated h-1.5 rounded overflow-hidden border border-border/50">
                   <div
                     className="bg-warning h-full rounded transition-all"
                     style={{ width: `${Math.min(ext.percentage, 100)}%` }}
@@ -136,7 +136,7 @@ export const StorageAnalyticsDashboard: React.FC = () => {
 
         <div className="border border-border rounded overflow-hidden text-xs">
           <table className="w-full text-left">
-            <thead className="bg-[#121316] text-muted border-b border-border">
+            <thead className="bg-elevated text-muted border-b border-border">
               <tr>
                 <th className="px-3 py-2">Directory Path</th>
                 <th className="px-3 py-2">Files Count</th>
@@ -240,7 +240,7 @@ export const StorageAnalyticsDashboard: React.FC = () => {
         ) : (
           <div className="border border-border rounded overflow-hidden text-xs">
             <table className="w-full text-left font-mono">
-              <thead className="bg-[#121316] text-muted border-b border-border">
+              <thead className="bg-elevated text-muted border-b border-border">
                 <tr>
                   <th className="px-3 py-2 font-sans">Date / Timestamp</th>
                   <th className="px-3 py-2 font-sans">Snapshot Label</th>

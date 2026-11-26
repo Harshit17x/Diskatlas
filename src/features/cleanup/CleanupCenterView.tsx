@@ -74,22 +74,14 @@ export const CleanupCenterView: React.FC = () => {
     fetchSessions(1, 20);
     fetchAuditHistory(1);
     fetchForgottenFiles();
-  }, [fetchSessions, fetchAuditHistory, fetchForgottenFiles]);
-
-  // Load cleanup plan when active session is determined or changed
-  useEffect(() => {
-    const sid = selectedSessionId || (sessionsPage?.items[0]?.id ?? null);
-    if (sid) {
-      fetchCleanupPlan(sid);
-    }
-  }, [selectedSessionId, sessionsPage, fetchCleanupPlan]);
+    fetchCleanupPlan(selectedSessionId);
+  }, [fetchSessions, fetchAuditHistory, fetchForgottenFiles, fetchCleanupPlan, selectedSessionId]);
 
   const handleSessionChange = (sid: string) => {
-    setSelectedSessionId(sid || null);
-    if (sid) {
-      fetchCleanupPlan(sid);
-      fetchForgottenFiles(sid);
-    }
+    const nextSid = sid || null;
+    setSelectedSessionId(nextSid);
+    fetchCleanupPlan(nextSid);
+    fetchForgottenFiles(nextSid || undefined);
   };
 
   // Filter candidates based on group, risk, and search query
@@ -315,13 +307,13 @@ export const CleanupCenterView: React.FC = () => {
   };
 
   return (
-    <div className="space-y-4 pb-12">
+    <div className="space-y-4">
       {/* 1. Header & Session Selector */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-border">
         <div>
           <h1 className="text-base font-semibold text-primary">Safe Cleanup Center</h1>
           <p className="text-xs text-secondary mt-0.5">
-            Transparent, user-controlled storage cleanup with Windows Recycle Bin protection and audit history
+            Transparent, user-controlled storage cleanup with Recycle Bin / Trash protection and audit history
           </p>
         </div>
 
@@ -329,8 +321,9 @@ export const CleanupCenterView: React.FC = () => {
           <select
             value={selectedSessionId || ''}
             onChange={(e) => handleSessionChange(e.target.value)}
-            className="bg-[#15171B] border border-border rounded px-2.5 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
+            className="bg-panel border border-border rounded px-2.5 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
           >
+            <option value="">Latest Completed Scan</option>
             {sessionsPage?.items.map((session) => (
               <option key={session.id} value={session.id}>
                 Session {session.id.slice(0, 8)} ({session.driveId} - {session.status})
@@ -342,7 +335,7 @@ export const CleanupCenterView: React.FC = () => {
             variant="ghost"
             size="sm"
             onClick={() => {
-              if (selectedSessionId) fetchCleanupPlan(selectedSessionId);
+              fetchCleanupPlan(selectedSessionId);
               fetchAuditHistory(1);
             }}
             icon={<RotateCw className="w-3.5 h-3.5" />}
@@ -421,7 +414,7 @@ export const CleanupCenterView: React.FC = () => {
                   placeholder="Filter recommendations by path or name..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full bg-[#101114] border border-border rounded pl-8 pr-3 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
+                  className="w-full bg-elevated border border-border rounded pl-8 pr-3 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
                 />
               </div>
 
@@ -490,12 +483,14 @@ export const CleanupCenterView: React.FC = () => {
               <select
                 value={riskFilter}
                 onChange={(e) => setRiskFilter(e.target.value as any)}
-                className="bg-[#101114] border border-border rounded px-2 py-0.5 text-xs text-primary font-mono"
+                className="bg-elevated border border-border rounded px-2 py-0.5 text-xs text-primary font-mono"
               >
                 <option value="all">All Risks</option>
+                <option value="none">No Risk</option>
                 <option value="low">Low Risk</option>
                 <option value="moderate">Moderate Risk</option>
                 <option value="high">High Risk</option>
+                <option value="critical">Critical Risk</option>
               </select>
             </div>
           </Card>
@@ -518,7 +513,7 @@ export const CleanupCenterView: React.FC = () => {
                     key={candidate.id}
                     className={`p-3.5 transition-all border ${
                       candidate.isBlocked
-                        ? 'opacity-65 border-border bg-[#101114]/50'
+                        ? 'opacity-65 border-border bg-elevated/40'
                         : isSelected
                         ? 'border-accent/40 bg-elevated/80'
                         : 'border-border bg-panel hover:bg-elevated/40'
@@ -595,7 +590,7 @@ export const CleanupCenterView: React.FC = () => {
           )}
 
           {/* Sticky Bottom Action Bar */}
-          <div className="fixed bottom-0 left-64 right-0 p-3 bg-panel/95 backdrop-blur-md border-t border-border flex items-center justify-between z-30 px-6">
+          <div className="sticky bottom-0 p-3 bg-panel/95 backdrop-blur-md border border-border rounded-lg flex items-center justify-between z-20 px-4 shadow-lg">
             <div className="flex items-center gap-4 text-xs">
               <span className="text-secondary">
                 Selected for cleanup:{' '}
@@ -685,7 +680,7 @@ export const CleanupCenterView: React.FC = () => {
                 size="sm"
                 onClick={() => {
                   setForgottenFilesQuery({ minAgeDays: 30, page: 1 });
-                  fetchForgottenFiles();
+                  fetchForgottenFiles(selectedSessionId || undefined);
                 }}
               >
                 &gt; 30 Days
@@ -695,7 +690,7 @@ export const CleanupCenterView: React.FC = () => {
                 size="sm"
                 onClick={() => {
                   setForgottenFilesQuery({ minAgeDays: 60, page: 1 });
-                  fetchForgottenFiles();
+                  fetchForgottenFiles(selectedSessionId || undefined);
                 }}
               >
                 &gt; 60 Days
@@ -705,7 +700,7 @@ export const CleanupCenterView: React.FC = () => {
                 size="sm"
                 onClick={() => {
                   setForgottenFilesQuery({ minAgeDays: 90, page: 1 });
-                  fetchForgottenFiles();
+                  fetchForgottenFiles(selectedSessionId || undefined);
                 }}
               >
                 &gt; 90 Days
@@ -718,6 +713,40 @@ export const CleanupCenterView: React.FC = () => {
             columns={forgottenColumns}
             emptyMessage="No forgotten files detected for the selected threshold."
           />
+
+          {forgottenFiles && forgottenFiles.totalPages > 1 && (
+            <div className="flex items-center justify-between pt-2 border-t border-border text-xs text-secondary font-mono">
+              <span>
+                Page {forgottenFiles.page} of {forgottenFiles.totalPages} ({forgottenFiles.totalItems} items)
+              </span>
+              <div className="flex items-center gap-1.5">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={forgottenFiles.page <= 1}
+                  onClick={() => {
+                    setForgottenFilesQuery({ page: forgottenFiles.page - 1 });
+                    fetchForgottenFiles(selectedSessionId || undefined);
+                  }}
+                  icon={<ChevronLeft className="w-3.5 h-3.5" />}
+                >
+                  Previous
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={forgottenFiles.page >= forgottenFiles.totalPages}
+                  onClick={() => {
+                    setForgottenFilesQuery({ page: forgottenFiles.page + 1 });
+                    fetchForgottenFiles(selectedSessionId || undefined);
+                  }}
+                  icon={<ChevronRight className="w-3.5 h-3.5" />}
+                >
+                  Next
+                </Button>
+              </div>
+            </div>
+          )}
         </Card>
       )}
 

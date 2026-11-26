@@ -25,7 +25,7 @@ interface HistoryState {
   isLoading: boolean;
   error: string | null;
 
-  fetchSessions: (page?: number, pageSize?: number, driveId?: string, status?: string) => Promise<void>;
+  fetchSessions: (page?: number, pageSize?: number, driveId?: string | null, status?: string | null) => Promise<void>;
   fetchSessionDetails: (sessionId: string) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<boolean>;
   fetchSnapshots: (driveId?: string) => Promise<void>;
@@ -56,12 +56,14 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
   error: null,
 
   fetchSessions: async (page = 1, pageSize = 20, driveId, status) => {
+    const nextDriveId = driveId === undefined ? get().filterDriveId : driveId || null;
+    const nextStatus = status === undefined ? get().filterStatus : status || null;
     set({ isLoading: true, error: null });
     const res = await safeInvoke<ScanSessionPage>('get_scan_sessions', {
       page,
       pageSize,
-      driveId: driveId || get().filterDriveId || null,
-      status: status || get().filterStatus || null,
+      driveId: nextDriveId,
+      status: nextStatus,
     });
 
     if (res.ok) {
@@ -69,8 +71,8 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
         sessionsPage: res.data,
         currentPage: page,
         pageSize,
-        filterDriveId: driveId ?? get().filterDriveId,
-        filterStatus: status ?? get().filterStatus,
+        filterDriveId: nextDriveId,
+        filterStatus: nextStatus,
         isLoading: false,
       });
     } else {
@@ -91,8 +93,11 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
   deleteSession: async (sessionId: string) => {
     const res = await safeInvoke('delete_scan_session', { sessionId });
     if (res.ok) {
-      // Refresh sessions
       get().fetchSessions(get().currentPage, get().pageSize);
+      get().fetchSnapshots(get().filterDriveId || undefined);
+      import('./driveStore').then(({ useDriveStore }) => {
+        useDriveStore.getState().fetchDbHealth();
+      });
       if (get().selectedSessionDetails?.session.id === sessionId) {
         set({ selectedSessionDetails: null });
       }

@@ -1,10 +1,12 @@
 import React from 'react';
 import { Database, HardDrive, Cpu, ShieldCheck, Activity } from 'lucide-react';
 import { useDriveStore } from '../../stores/driveStore';
-import { formatBytes } from '../../utils/formatters';
+import { useScanStore } from '../../stores/scanStore';
+import { formatBytes, formatNumber } from '../../utils/formatters';
 
 export const StatusBar: React.FC = () => {
   const { drives, selectedDriveId, systemInfo, dbHealth, error } = useDriveStore();
+  const { isScanning, isPaused, progress } = useScanStore();
   const selectedDrive = drives.find((d) => d.id === selectedDriveId) || drives[0];
 
   return (
@@ -43,9 +45,19 @@ export const StatusBar: React.FC = () => {
 
         {/* Scanner State */}
         <div className="hidden md:flex items-center gap-1.5">
-          <Activity className="w-3 h-3 text-muted" />
+          <Activity
+            className={`w-3 h-3 ${
+              isScanning ? (isPaused ? 'text-warning' : 'text-accent animate-pulse') : 'text-muted'
+            }`}
+          />
           <span>Engine:</span>
-          <span className="text-secondary">Ready (Rayon / Tokio staged)</span>
+          <span className="text-secondary">
+            {isScanning
+              ? isPaused
+                ? 'Paused'
+                : `Scanning (${formatNumber(progress?.filesScanned ?? 0)} files)`
+              : 'Ready (Rayon / Tokio staged)'}
+          </span>
         </div>
       </div>
 

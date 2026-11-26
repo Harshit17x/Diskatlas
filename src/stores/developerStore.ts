@@ -6,8 +6,7 @@ import type {
   GlobalToolCacheItem,
 } from '../types/bindings';
 import { safeInvoke } from '../utils/tauri';
-import { useScanStore } from './scanStore';
-import { useHistoryStore } from './historyStore';
+import { resolvePreferredSessionId } from '../utils/session';
 
 interface DeveloperState {
   profile: DeveloperAnalysisProfile | null;
@@ -18,7 +17,7 @@ interface DeveloperState {
   isLoading: boolean;
   error: string | null;
 
-  fetchDeveloperStorage: (sessionIdOverride?: string) => Promise<void>;
+  fetchDeveloperStorage: (sessionIdOverride?: string, forceRefresh?: boolean) => Promise<void>;
   fetchDockerStorage: () => Promise<void>;
   fetchGlobalCaches: () => Promise<void>;
   setFilterEcosystem: (ecosystem: string | null) => void;
@@ -37,28 +36,13 @@ export const useDeveloperStore = create<DeveloperState>((set, get) => ({
   setFilterEcosystem: (ecosystem) => set({ filterEcosystem: ecosystem }),
   setSelectedProject: (project) => set({ selectedProject: project }),
 
-  fetchDeveloperStorage: async (sessionIdOverride) => {
-    let sid = sessionIdOverride;
-    if (!sid) {
-      sid = useScanStore.getState().activeSessionId || useScanStore.getState().summary?.sessionId;
-    }
-    if (!sid) {
-      const recent = useHistoryStore.getState().sessionsPage?.items[0];
-      if (recent) {
-        sid = recent.id;
-      }
-    }
-
-    if (!sid) {
-      // Still fetch live Docker and global caches even without a scan session
-      get().fetchDockerStorage();
-      get().fetchGlobalCaches();
-      return;
-    }
+  fetchDeveloperStorage: async (sessionIdOverride, forceRefresh = false) => {
+    const sid = resolvePreferredSessionId(sessionIdOverride);
 
     set({ isLoading: true, error: null });
     const res = await safeInvoke<DeveloperAnalysisProfile>('get_developer_storage', {
-      sessionId: sid,
+      sessionId: sid || null,
+      forceRefresh,
     });
 
     if (res.ok) {

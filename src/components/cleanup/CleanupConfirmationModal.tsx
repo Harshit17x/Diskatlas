@@ -181,7 +181,7 @@ export const CleanupConfirmationModal: React.FC = () => {
             <span>PREVIEW OF ITEMS TO CLEAN ({selectedCandidates.length})</span>
             <span>TOTAL: {formatBytes(totalReclaimableBytes)}</span>
           </div>
-          <div className="max-h-44 overflow-y-auto border border-border rounded divide-y divide-border bg-[#101114]">
+          <div className="max-h-44 overflow-y-auto border border-border rounded divide-y divide-border bg-elevated">
             {selectedCandidates.map((c) => (
               <div key={c.id} className="p-2 flex items-center justify-between gap-3 text-xs">
                 <div className="min-w-0 flex items-center gap-2">
@@ -226,7 +226,7 @@ export const CleanupConfirmationModal: React.FC = () => {
             value={inputPhrase}
             onChange={(e) => setInputPhrase(e.target.value)}
             placeholder="Type CONFIRM_CLEANUP here"
-            className="w-full bg-[#101114] border border-border rounded px-3 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
+            className="w-full bg-panel border border-border rounded px-3 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
           />
         </div>
       </div>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   LayoutDashboard,
   HardDrive,
@@ -33,106 +33,114 @@ export const CommandPalette: React.FC = () => {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const commands: CommandItem[] = [
-    {
-      id: 'nav-dashboard',
-      title: 'Go to Dashboard',
-      category: 'Navigation',
-      icon: <LayoutDashboard className="w-4 h-4" />,
-      shortcut: 'G D',
-      onSelect: () => setActiveTab('dashboard'),
-    },
-    {
-      id: 'nav-explorer',
-      title: 'Go to Drive Explorer',
-      category: 'Navigation',
-      icon: <HardDrive className="w-4 h-4" />,
-      shortcut: 'G E',
-      onSelect: () => setActiveTab('explorer'),
-    },
-    {
-      id: 'nav-analysis',
-      title: 'Go to Storage Analysis',
-      category: 'Navigation',
-      icon: <PieChart className="w-4 h-4" />,
-      shortcut: 'G A',
-      onSelect: () => setActiveTab('analysis'),
-    },
-    {
-      id: 'nav-intelligence',
-      title: 'Go to Storage Intelligence',
-      category: 'Navigation',
-      icon: <Brain className="w-4 h-4" />,
-      shortcut: 'G I',
-      onSelect: () => setActiveTab('intelligence'),
-    },
-    {
-      id: 'nav-developer',
-      title: 'Go to Developer Storage',
-      category: 'Navigation',
-      icon: <Terminal className="w-4 h-4" />,
-      onSelect: () => setActiveTab('developer'),
-    },
-    {
-      id: 'nav-hidden',
-      title: 'Go to Hidden Files',
-      category: 'Navigation',
-      icon: <EyeOff className="w-4 h-4" />,
-      onSelect: () => setActiveTab('hidden'),
-    },
-    {
-      id: 'nav-applications',
-      title: 'Go to Applications',
-      category: 'Navigation',
-      icon: <Box className="w-4 h-4" />,
-      onSelect: () => setActiveTab('applications'),
-    },
-    {
-      id: 'nav-duplicates',
-      title: 'Go to Duplicate Finder',
-      category: 'Navigation',
-      icon: <Copy className="w-4 h-4" />,
-      onSelect: () => setActiveTab('duplicates'),
-    },
-    {
-      id: 'nav-cleanup',
-      title: 'Go to Cleanup Center',
-      category: 'Navigation',
-      icon: <Sparkles className="w-4 h-4" />,
-      onSelect: () => setActiveTab('cleanup'),
-    },
-    {
-      id: 'nav-history',
-      title: 'Go to Storage History',
-      category: 'Navigation',
-      icon: <History className="w-4 h-4" />,
-      onSelect: () => setActiveTab('history'),
-    },
-    {
-      id: 'nav-settings',
-      title: 'Go to Settings',
-      category: 'Navigation',
-      icon: <Settings className="w-4 h-4" />,
-      shortcut: 'G S',
-      onSelect: () => setActiveTab('settings'),
-    },
-    {
-      id: 'action-refresh',
-      title: 'Refresh Discovered Drives',
-      category: 'Actions',
-      icon: <RefreshCw className="w-4 h-4" />,
-      shortcut: 'R',
-      onSelect: () => {
-        fetchDrives();
-        fetchSystemInfo();
-        fetchDbHealth();
+  const commands: CommandItem[] = useMemo(
+    () => [
+      {
+        id: 'nav-dashboard',
+        title: 'Go to Dashboard',
+        category: 'Navigation',
+        icon: <LayoutDashboard className="w-4 h-4" />,
+        shortcut: 'G D',
+        onSelect: () => setActiveTab('dashboard'),
       },
-    },
-  ];
-
-  const filtered = commands.filter((cmd) =>
-    cmd.title.toLowerCase().includes(query.toLowerCase())
+      {
+        id: 'nav-explorer',
+        title: 'Go to Drive Explorer',
+        category: 'Navigation',
+        icon: <HardDrive className="w-4 h-4" />,
+        shortcut: 'G E',
+        onSelect: () => setActiveTab('explorer'),
+      },
+      {
+        id: 'nav-analysis',
+        title: 'Go to Storage Analysis',
+        category: 'Navigation',
+        icon: <PieChart className="w-4 h-4" />,
+        shortcut: 'G A',
+        onSelect: () => setActiveTab('analysis'),
+      },
+      {
+        id: 'nav-intelligence',
+        title: 'Go to Storage Intelligence',
+        category: 'Navigation',
+        icon: <Brain className="w-4 h-4" />,
+        shortcut: 'G I',
+        onSelect: () => setActiveTab('intelligence'),
+      },
+      {
+        id: 'nav-developer',
+        title: 'Go to Developer Storage',
+        category: 'Navigation',
+        icon: <Terminal className="w-4 h-4" />,
+        onSelect: () => setActiveTab('developer'),
+      },
+      {
+        id: 'nav-hidden',
+        title: 'Go to Hidden Files',
+        category: 'Navigation',
+        icon: <EyeOff className="w-4 h-4" />,
+        onSelect: () => setActiveTab('hidden'),
+      },
+      {
+        id: 'nav-applications',
+        title: 'Go to Applications',
+        category: 'Navigation',
+        icon: <Box className="w-4 h-4" />,
+        onSelect: () => setActiveTab('applications'),
+      },
+      {
+        id: 'nav-duplicates',
+        title: 'Go to Duplicate Finder',
+        category: 'Navigation',
+        icon: <Copy className="w-4 h-4" />,
+        onSelect: () => setActiveTab('duplicates'),
+      },
+      {
+        id: 'nav-cleanup',
+        title: 'Go to Cleanup Center',
+        category: 'Navigation',
+        icon: <Sparkles className="w-4 h-4" />,
+        onSelect: () => setActiveTab('cleanup'),
+      },
+      {
+        id: 'nav-history',
+        title: 'Go to Storage History',
+        category: 'Navigation',
+        icon: <History className="w-4 h-4" />,
+        onSelect: () => setActiveTab('history'),
+      },
+      {
+        id: 'nav-settings',
+        title: 'Go to Settings',
+        category: 'Navigation',
+        icon: <Settings className="w-4 h-4" />,
+        shortcut: 'G S',
+        onSelect: () => setActiveTab('settings'),
+      },
+      {
+        id: 'action-refresh',
+        title: 'Refresh Discovered Drives',
+        category: 'Actions',
+        icon: <RefreshCw className="w-4 h-4" />,
+        shortcut: '⌘R',
+        onSelect: () => {
+          fetchDrives();
+          fetchSystemInfo();
+          fetchDbHealth();
+        },
+      },
+    ],
+    [setActiveTab, fetchDrives, fetchSystemInfo, fetchDbHealth]
   );
+
+  const filtered = useMemo(
+    () =>
+      commands.filter((cmd) => cmd.title.toLowerCase().includes(query.toLowerCase())),
+    [commands, query]
+  );
+
+  const latestRef = useRef({ commandPaletteOpen, filtered, selectedIndex });
+  latestRef.current = { commandPaletteOpen, filtered, selectedIndex };
 
   useEffect(() => {
     if (commandPaletteOpen) {
@@ -144,24 +152,28 @@ export const CommandPalette: React.FC = () => {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      const { commandPaletteOpen: isOpen, filtered: list, selectedIndex: selIdx } =
+        latestRef.current;
+
       // Toggle Command Palette with Cmd+K or Ctrl+K
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
-        setCommandPaletteOpen(!commandPaletteOpen);
+        setCommandPaletteOpen(!isOpen);
+        return;
       }
 
-      if (!commandPaletteOpen) return;
+      if (!isOpen) return;
 
       if (e.key === 'ArrowDown') {
         e.preventDefault();
-        setSelectedIndex((prev) => (prev + 1) % (filtered.length || 1));
+        setSelectedIndex((prev) => (prev + 1) % (list.length || 1));
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
-        setSelectedIndex((prev) => (prev - 1 + (filtered.length || 1)) % (filtered.length || 1));
+        setSelectedIndex((prev) => (prev - 1 + (list.length || 1)) % (list.length || 1));
       } else if (e.key === 'Enter') {
         e.preventDefault();
-        if (filtered[selectedIndex]) {
-          filtered[selectedIndex].onSelect();
+        if (list[selIdx]) {
+          list[selIdx].onSelect();
           setCommandPaletteOpen(false);
         }
       } else if (e.key === 'Escape') {
@@ -172,7 +184,7 @@ export const CommandPalette: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [commandPaletteOpen, filtered, selectedIndex, setCommandPaletteOpen]);
+  }, [setCommandPaletteOpen]);
 
   if (!commandPaletteOpen) return null;
 

@@ -10,6 +10,8 @@ import {
 } from 'lucide-react';
 import { useUIStore } from '../../stores/uiStore';
 import { useDriveStore } from '../../stores/driveStore';
+import { useScanStore } from '../../stores/scanStore';
+import { formatNumber } from '../../utils/formatters';
 import { Badge } from '../common/Badge';
 
 export const Header: React.FC = () => {
@@ -23,6 +25,7 @@ export const Header: React.FC = () => {
     fetchDbHealth,
     isLoading,
   } = useDriveStore();
+  const { isScanning, isPaused, progress } = useScanStore();
 
   const handleRefresh = () => {
     fetchDrives();
@@ -110,8 +113,22 @@ export const Header: React.FC = () => {
 
         {/* Scan Status Indicator */}
         <div className="hidden lg:flex items-center gap-2 px-2.5 py-1 rounded border border-border bg-panel text-[11px] text-secondary">
-          <span className="w-2 h-2 rounded-full bg-success"></span>
-          <span>Scanner Ready</span>
+          <span
+            className={`w-2 h-2 rounded-full ${
+              isScanning
+                ? isPaused
+                  ? 'bg-warning'
+                  : 'bg-accent animate-pulse'
+                : 'bg-success'
+            }`}
+          />
+          <span>
+            {isScanning
+              ? isPaused
+                ? 'Scan Paused'
+                : `Scanning (${formatNumber(progress?.filesScanned ?? 0)})`
+              : 'Scanner Ready'}
+          </span>
         </div>
 
         {/* Refresh Drives */}

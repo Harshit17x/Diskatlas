@@ -60,11 +60,11 @@ export const App: React.FC = () => {
     };
   }, [setupEventListeners]);
 
-  // Global keyboard shortcuts (Cmd+1 to Cmd+9)
+  // Global keyboard shortcuts (Cmd+1 to Cmd+9, Cmd+0, Cmd+, and Cmd+R)
   useEffect(() => {
     const handleKeyNav = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey) {
-        switch (e.key) {
+        switch (e.key.toLowerCase()) {
           case '1':
             e.preventDefault();
             setActiveTab('dashboard');
@@ -109,13 +109,19 @@ export const App: React.FC = () => {
             e.preventDefault();
             setActiveTab('settings');
             break;
+          case 'r':
+            e.preventDefault();
+            fetchDrives();
+            fetchSystemInfo();
+            fetchDbHealth();
+            break;
         }
       }
     };
 
     window.addEventListener('keydown', handleKeyNav);
     return () => window.removeEventListener('keydown', handleKeyNav);
-  }, [setActiveTab]);
+  }, [setActiveTab, fetchDrives, fetchSystemInfo, fetchDbHealth]);
 
   const renderContent = () => {
     switch (activeTab) {

@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { safeInvoke } from '../utils/tauri';
-import { useScanStore } from './scanStore';
+import { resolvePreferredSessionId } from '../utils/session';
 import type {
   LargeFilesQuery,
   LargeFilesResponse,
@@ -74,7 +74,7 @@ export const useAdvancedAnalysisStore = create<AdvancedAnalysisState>((set, get)
     })),
   fetchLargeFiles: async (sessionId) => {
     set({ largeFilesLoading: true, error: null });
-    const sid = sessionId || get().selectedSessionId || useScanStore.getState().activeSessionId || undefined;
+    const sid = resolvePreferredSessionId(sessionId ?? get().selectedSessionId);
     const res = await safeInvoke<LargeFilesResponse>('get_large_files', {
       query: { ...get().largeFilesQuery, sessionId: sid },
     });
@@ -100,7 +100,7 @@ export const useAdvancedAnalysisStore = create<AdvancedAnalysisState>((set, get)
     })),
   fetchHiddenFiles: async (sessionId) => {
     set({ hiddenFilesLoading: true, error: null });
-    const sid = sessionId || get().selectedSessionId || useScanStore.getState().activeSessionId || undefined;
+    const sid = resolvePreferredSessionId(sessionId ?? get().selectedSessionId);
     const res = await safeInvoke<HiddenFilesResponse>('get_hidden_files', {
       query: { ...get().hiddenFilesQuery, sessionId: sid },
     });
@@ -124,7 +124,7 @@ export const useAdvancedAnalysisStore = create<AdvancedAnalysisState>((set, get)
     })),
   searchDuplicates: async (sessionId) => {
     set({ duplicatesLoading: true, error: null });
-    const sid = sessionId || get().selectedSessionId || useScanStore.getState().activeSessionId || undefined;
+    const sid = resolvePreferredSessionId(sessionId ?? get().selectedSessionId);
     const res = await safeInvoke<DuplicateSearchResponse>('find_duplicates', {
       query: { ...get().duplicateQuery, sessionId: sid },
     });
@@ -149,7 +149,7 @@ export const useAdvancedAnalysisStore = create<AdvancedAnalysisState>((set, get)
     })),
   fetchForgottenFiles: async (sessionId) => {
     set({ forgottenFilesLoading: true, error: null });
-    const sid = sessionId || get().selectedSessionId || useScanStore.getState().activeSessionId || undefined;
+    const sid = resolvePreferredSessionId(sessionId ?? get().selectedSessionId);
     const res = await safeInvoke<ForgottenFilesResponse>('get_forgotten_files', {
       query: { ...get().forgottenFilesQuery, sessionId: sid },
     });
@@ -165,7 +165,7 @@ export const useAdvancedAnalysisStore = create<AdvancedAnalysisState>((set, get)
   unknownStorageLoading: false,
   fetchUnknownStorage: async (sessionId) => {
     set({ unknownStorageLoading: true, error: null });
-    const sid = sessionId || get().selectedSessionId || useScanStore.getState().activeSessionId || undefined;
+    const sid = resolvePreferredSessionId(sessionId ?? get().selectedSessionId);
     const res = await safeInvoke<UnknownStorageResponse>('get_unknown_storage', {
       sessionId: sid,
     });

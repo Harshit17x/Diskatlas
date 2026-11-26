@@ -58,7 +58,24 @@ export interface DatabaseHealth {
   migrationVersion: number;
   dbPath: string;
   tablesCount: number;
+  dbSizeBytes?: number;
+  walSizeBytes?: number;
   message?: string;
+}
+
+export interface DatabaseIntegrityReport {
+  ok: boolean;
+  details: string[];
+  migrationVersion: number;
+  walMode: string;
+}
+
+export interface DatabaseMaintenanceReport {
+  vacuumed: boolean;
+  walCheckpointed: boolean;
+  dbSizeBeforeBytes: number;
+  dbSizeAfterBytes: number;
+  message: string;
 }
 
 export interface AppError {
@@ -596,6 +613,8 @@ export interface HierarchicalNode {
   category: string | null;
   isDirectory: boolean;
   fileCount: number | null;
+  sessionId?: string | null;
+  isSynthetic?: boolean;
   children?: HierarchicalNode[];
 }
 

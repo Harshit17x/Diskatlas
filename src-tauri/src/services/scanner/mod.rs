@@ -87,7 +87,7 @@ mod tests {
         };
 
         let status = Arc::new(AtomicU8::new(STATUS_RUNNING));
-        let pause_notify = Arc::new(tokio::sync::Notify::new());
+        let pause_signal = Arc::new((Mutex::new(()), std::sync::Condvar::new()));
         let progress = Arc::new(Mutex::new(ScanProgress {
             session_id: session_id.clone(),
             drive_id: "TEST_DRIVE".to_string(),
@@ -106,7 +106,7 @@ mod tests {
         let summary = ScanEngine::run_scan(
             options,
             status,
-            pause_notify,
+            pause_signal,
             progress,
             db_pool.clone(),
             None,
@@ -121,7 +121,7 @@ mod tests {
         // 4. Verify SQLite database persistence and pagination
         let manager = ScanManager::new();
         let page = manager
-            .get_files(&session_id, 1, 10, None, Some("size".into()), Some(true), &db_pool)
+            .get_files(Some(&session_id), 1, 10, None, Some("size".into()), Some(true), &db_pool)
             .unwrap();
 
         assert_eq!(page.total_count, summary.total_files);
@@ -229,8 +229,7 @@ mod tests {
         .unwrap();
 
         {
-            let conn_arc = db_pool.conn();
-            let conn = conn_arc.lock().unwrap();
+            let conn = db_pool.lock_conn();
             let count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM category_summaries WHERE session_id = ?1;",
@@ -240,6 +239,121 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 2);
         }
+
+        let _ = fs::remove_dir_all(&temp_base);
+    }
+
+    #[test]
+    fn test_synthesize_missing_ancestors_and_root_tree_connectivity() {
+        let test_run_id = Uuid::new_v4().to_string();
+        let temp_base = std::env::temp_dir().join(format!("diskatlas_tree_synth_{}", test_run_id));
+        fs::create_dir_all(&temp_base).unwrap();
+        let db_path = temp_base.join("test_tree.db");
+        let db_pool = DbPool::new(&db_path).unwrap();
+        let session_id = format!("test-tree-{}", test_run_id);
+
+        {
+            let mut conn = db_pool.lock_conn();
+            crate::storage::migrator::Migrator::run(&mut conn).unwrap();
+            conn.execute(
+                "INSERT INTO drives (id, label, mount_point, filesystem, total_bytes, available_bytes)
+                 VALUES ('MAC', 'Macintosh HD', '/', 'apfs', 10000000, 5000000);",
+                (),
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO scan_sessions (id, drive_id, root_path, status)
+                 VALUES (?1, 'MAC', '/', 'running');",
+                [&session_id],
+            )
+            .unwrap();
+        }
+
+        // Simulate macOS `/` firmlink seeding where `/Users` and `/usr` were never visited directly
+        let mut dir_map = std::collections::HashMap::new();
+        dir_map.insert(
+            "/Users/alice".to_string(),
+            crate::services::scanner::models::RawDirItem {
+                path: "/Users/alice".to_string(),
+                name: "alice".to_string(),
+                parent_path: Some("/Users".to_string()),
+                file_count: 10,
+                dir_count: 2,
+                total_size_bytes: 5000,
+                created_at: None,
+                modified_at: None,
+                is_hidden: false,
+                is_system: false,
+            },
+        );
+        dir_map.insert(
+            "/usr/local".to_string(),
+            crate::services::scanner::models::RawDirItem {
+                path: "/usr/local".to_string(),
+                name: "local".to_string(),
+                parent_path: Some("/usr".to_string()),
+                file_count: 4,
+                dir_count: 1,
+                total_size_bytes: 2000,
+                created_at: None,
+                modified_at: None,
+                is_hidden: false,
+                is_system: false,
+            },
+        );
+        dir_map.insert(
+            "/Applications".to_string(),
+            crate::services::scanner::models::RawDirItem {
+                path: "/Applications".to_string(),
+                name: "Applications".to_string(),
+                parent_path: Some("/".to_string()),
+                file_count: 3,
+                dir_count: 0,
+                total_size_bytes: 3000,
+                created_at: None,
+                modified_at: None,
+                is_hidden: false,
+                is_system: false,
+            },
+        );
+
+        ScanEngine::rollup_and_flush_directories(
+            &db_pool,
+            &session_id,
+            &mut dir_map,
+            100,
+            std::path::Path::new("/"),
+        )
+        .unwrap();
+        ScanEngine::ensure_root_directory_row(
+            &db_pool,
+            &session_id,
+            std::path::Path::new("/"),
+            17,
+            3,
+            10000,
+        )
+        .unwrap();
+
+        let conn = db_pool.lock_conn();
+        let children: Vec<(String, i64)> = {
+            let mut stmt = conn
+                .prepare("SELECT path, total_size_bytes FROM directories WHERE session_id = ?1 AND parent_path = '/' ORDER BY total_size_bytes DESC")
+                .unwrap();
+            stmt.query_map([&session_id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+
+        assert_eq!(
+            children,
+            vec![
+                ("/Users".to_string(), 5000),
+                ("/Applications".to_string(), 3000),
+                ("/usr".to_string(), 2000),
+            ]
+        );
 
         let _ = fs::remove_dir_all(&temp_base);
     }

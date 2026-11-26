@@ -19,7 +19,7 @@ use crate::commands::{
         add_category_override, classify_session, delete_category_override, get_category_files,
         get_category_overrides, get_storage_analysis,
     },
-    database::get_database_health,
+    database::{get_database_health, vacuum_database, verify_database_integrity},
     developer::{get_developer_storage, get_docker_storage, get_global_tool_caches},
     drives::{get_drive_details, get_drives, list_drives},
     history::{
@@ -74,8 +74,7 @@ pub fn run() {
 
             // 4. Run baseline embedded migrations
             {
-                let conn_arc = db_pool.conn();
-                let mut conn = conn_arc.lock().unwrap();
+                let mut conn = db_pool.lock_conn();
                 let latest_version = Migrator::run(&mut conn)?;
                 info!("Database initialized at schema version {}", latest_version);
             }
@@ -96,6 +95,8 @@ pub fn run() {
             get_drive_details,
             list_drives,
             get_database_health,
+            verify_database_integrity,
+            vacuum_database,
             start_scan,
             pause_scan,
             resume_scan,

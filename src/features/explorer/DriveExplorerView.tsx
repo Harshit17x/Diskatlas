@@ -56,9 +56,11 @@ export const DriveExplorerView: React.FC = () => {
   const {
     tree,
     isLoadingTree,
+    currentSessionId,
     currentRootPath,
     breadcrumbs,
     maxDepth,
+    error: vizError,
     fetchTree,
     drillDown,
     navigateUp,
@@ -67,7 +69,7 @@ export const DriveExplorerView: React.FC = () => {
   } = useVisualizationStore();
 
   useEffect(() => {
-    fetchTree(activeSessionId || undefined, currentPath);
+    fetchTree(activeSessionId || undefined, undefined);
   }, [fetchTree, activeSessionId]);
 
   useEffect(() => {
@@ -75,6 +77,14 @@ export const DriveExplorerView: React.FC = () => {
       setCurrentPath(currentRootPath);
     }
   }, [currentRootPath]);
+
+  useEffect(() => {
+    const targetSid = currentSessionId || activeSessionId || undefined;
+    const targetParent = currentRootPath || undefined;
+    if (targetSid || targetParent) {
+      fetchScanFiles(targetSid, 1, pageSize, targetParent, sortBy, sortDesc);
+    }
+  }, [currentSessionId, currentRootPath, activeSessionId, pageSize, sortBy, sortDesc, fetchScanFiles]);
 
   const getFileCategoryIcon = (ext: string | null) => {
     if (!ext) return <File className="w-3.5 h-3.5 text-secondary flex-shrink-0" />;
@@ -112,11 +122,25 @@ export const DriveExplorerView: React.FC = () => {
   const handleSortChange = (newSortBy: string) => {
     const isSame = sortBy === newSortBy;
     const nextDesc = isSame ? !sortDesc : true;
-    fetchScanFiles(activeSessionId || undefined, 1, pageSize, undefined, newSortBy, nextDesc);
+    fetchScanFiles(
+      currentSessionId || activeSessionId || undefined,
+      1,
+      pageSize,
+      currentRootPath || undefined,
+      newSortBy,
+      nextDesc
+    );
   };
 
   const handlePageChange = (newPage: number) => {
-    fetchScanFiles(activeSessionId || undefined, newPage, pageSize, undefined, sortBy, sortDesc);
+    fetchScanFiles(
+      currentSessionId || activeSessionId || undefined,
+      newPage,
+      pageSize,
+      currentRootPath || undefined,
+      sortBy,
+      sortDesc
+    );
   };
 
   const columns: ColumnDef<ScanFileItem>[] = [
@@ -256,7 +280,7 @@ export const DriveExplorerView: React.FC = () => {
                   fetchTree(activeSessionId || undefined, d.mountPoint);
                 }
               }}
-              className="bg-[#15171B] border border-border rounded px-2.5 py-1 text-xs text-primary font-mono focus:outline-none focus:border-accent"
+              className="bg-panel border border-border rounded px-2.5 py-1 text-xs text-primary font-mono focus:outline-none focus:border-accent"
             >
               {drives.map((d) => (
                 <option key={d.id} value={d.id}>
@@ -273,7 +297,7 @@ export const DriveExplorerView: React.FC = () => {
         </div>
 
         {/* Current Path Bar */}
-        <div className="flex items-center justify-between px-3 py-2 bg-[#14161A] border border-border rounded text-xs font-mono text-secondary">
+        <div className="flex items-center justify-between px-3 py-2 bg-elevated border border-border rounded text-xs font-mono text-secondary">
           <div className="flex items-center gap-1.5 truncate">
             <FolderTree className="w-3.5 h-3.5 text-muted flex-shrink-0" />
             <span className="text-primary font-semibold truncate">{currentPath}</span>
@@ -290,6 +314,11 @@ export const DriveExplorerView: React.FC = () => {
             </Badge>
           )}
         </div>
+        {vizError && (
+          <div className="text-xs text-danger bg-danger/10 border border-danger/20 rounded px-3 py-2">
+            {vizError}
+          </div>
+        )}
       </Card>
 
       {/* 3. View Mode Switcher */}
@@ -307,7 +336,7 @@ export const DriveExplorerView: React.FC = () => {
               className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded transition-colors ${
                 viewMode === mode.id
                   ? 'bg-accent text-white font-medium'
-                  : 'text-secondary hover:text-primary hover:bg-[#1C1F25]'
+                  : 'text-secondary hover:text-primary hover:bg-elevated'
               }`}
             >
               {mode.icon}
@@ -331,7 +360,12 @@ export const DriveExplorerView: React.FC = () => {
               <p className="text-xs text-muted max-w-sm mx-auto">
                 Computing database tile squarification and directory depth boundaries...
               </p>
-            </Card>
+              {vizError && (
+          <div className="text-xs text-danger bg-danger/10 border border-danger/20 rounded px-3 py-2">
+            {vizError}
+          </div>
+        )}
+      </Card>
           ) : !tree ? (
             <Card padding="lg" className="text-center py-12 space-y-2">
               <LayoutGrid className="w-8 h-8 text-muted mx-auto" />
@@ -339,7 +373,12 @@ export const DriveExplorerView: React.FC = () => {
               <p className="text-xs text-muted max-w-sm mx-auto">
                 Run a scan on this volume to generate the interactive Treemap.
               </p>
-            </Card>
+              {vizError && (
+          <div className="text-xs text-danger bg-danger/10 border border-danger/20 rounded px-3 py-2">
+            {vizError}
+          </div>
+        )}
+      </Card>
           ) : (
             <TreemapChart
               data={tree}
@@ -363,7 +402,12 @@ export const DriveExplorerView: React.FC = () => {
               <p className="text-xs text-muted max-w-sm mx-auto">
                 Calculating angular segments and concentric ring coordinates...
               </p>
-            </Card>
+              {vizError && (
+          <div className="text-xs text-danger bg-danger/10 border border-danger/20 rounded px-3 py-2">
+            {vizError}
+          </div>
+        )}
+      </Card>
           ) : !tree ? (
             <Card padding="lg" className="text-center py-12 space-y-2">
               <PieChart className="w-8 h-8 text-muted mx-auto" />
@@ -371,7 +415,12 @@ export const DriveExplorerView: React.FC = () => {
               <p className="text-xs text-muted max-w-sm mx-auto">
                 Run a scan on this volume to generate the Sunburst concentric rings.
               </p>
-            </Card>
+              {vizError && (
+          <div className="text-xs text-danger bg-danger/10 border border-danger/20 rounded px-3 py-2">
+            {vizError}
+          </div>
+        )}
+      </Card>
           ) : (
             <SunburstChart
               data={tree}

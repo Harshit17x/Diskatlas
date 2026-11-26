@@ -236,8 +236,9 @@ export const DeveloperStorageView: React.FC = () => {
           <select
             value={profile?.sessionId || ''}
             onChange={(e) => handleSelectSession(e.target.value)}
-            className="bg-[#15171B] border border-border rounded px-2.5 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
+            className="bg-panel border border-border rounded px-2.5 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
           >
+            <option value="">Latest Completed Scan</option>
             {sessionsPage?.items.map((s) => (
               <option key={s.id} value={s.id}>
                 Session {s.id.slice(0, 8)} ({s.driveId} • {formatBytes(s.totalBytes)})
@@ -248,10 +249,10 @@ export const DeveloperStorageView: React.FC = () => {
           <Button
             variant="outline"
             size="sm"
-            icon={<RotateCw className="w-3.5 h-3.5" />}
-            onClick={() => fetchDeveloperStorage()}
+            icon={<RotateCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />}
+            onClick={() => fetchDeveloperStorage(profile?.sessionId, true)}
             disabled={isLoading}
-            title="Refresh developer intelligence analysis"
+            title="Re-analyze developer projects & caches"
           >
             Refresh
           </Button>
@@ -371,7 +372,7 @@ export const DeveloperStorageView: React.FC = () => {
                 <select
                   value={filterEcosystem || 'ALL'}
                   onChange={(e) => setFilterEcosystem(e.target.value === 'ALL' ? null : e.target.value)}
-                  className="bg-[#15171B] border border-border rounded px-2 py-1 text-xs text-primary focus:outline-none focus:border-accent"
+                  className="bg-panel border border-border rounded px-2 py-1 text-xs text-primary focus:outline-none focus:border-accent"
                 >
                   <option value="ALL">All Technologies</option>
                   <option value="Node.js">Node.js / JS</option>
@@ -463,7 +464,7 @@ export const DeveloperStorageView: React.FC = () => {
               </Card>
             )}
 
-            <div className="p-3 bg-[#131518] border border-border rounded flex items-start gap-2.5 text-xs text-muted">
+            <div className="p-3 bg-panel border border-border rounded flex items-start gap-2.5 text-xs text-muted">
               <Info className="w-4 h-4 text-accent shrink-0 mt-0.5" />
               <p className="text-[11px]">
                 <strong className="text-secondary">Safety Guarantee:</strong> DiskAtlas queries Docker allocation exclusively via official Docker engine APIs. DiskAtlas never directly tampers with or manipulates raw Docker storage files on disk.
@@ -541,7 +542,7 @@ export const DeveloperStorageView: React.FC = () => {
                 Artifact Roles Breakdown
               </h3>
 
-              <div className="p-3 bg-[#14161A] border border-border rounded space-y-2">
+              <div className="p-3 bg-elevated border border-border rounded space-y-2">
                 <div className="flex justify-between items-center">
                   <span className="text-secondary flex items-center gap-1.5">
                     <Package className="w-3.5 h-3.5 text-warning" />

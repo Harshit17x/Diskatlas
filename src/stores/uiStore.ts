@@ -18,7 +18,11 @@ interface UIState {
 const getInitialTheme = (): ThemeMode => {
   if (typeof window !== 'undefined') {
     const saved = localStorage.getItem('diskatlas_theme') as ThemeMode | null;
-    if (saved === 'dark' || saved === 'light') return saved;
+    if (saved === 'dark' || saved === 'light') {
+      document.documentElement.classList.toggle('dark', saved === 'dark');
+      return saved;
+    }
+    document.documentElement.classList.remove('dark');
   }
   return 'light'; // Default to light mode as requested
 };

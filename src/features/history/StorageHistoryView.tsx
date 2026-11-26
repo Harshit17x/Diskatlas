@@ -59,6 +59,7 @@ export const StorageHistoryView: React.FC = () => {
   const [isSnapshotModalOpen, setIsSnapshotModalOpen] = useState(false);
   const [snapshotDriveId, setSnapshotDriveId] = useState(drives[0]?.id || '');
   const [snapshotLabel, setSnapshotLabel] = useState('Manual Checkpoint');
+  const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState<string | null>(null);
 
   useEffect(() => {
     fetchSessions(1, 20);
@@ -72,17 +73,17 @@ export const StorageHistoryView: React.FC = () => {
   }, [drives, snapshotDriveId]);
 
   const handlePageChange = (newPage: number) => {
-    fetchSessions(newPage, pageSize, filterDriveId || undefined, filterStatus || undefined);
+    fetchSessions(newPage, pageSize, filterDriveId, filterStatus);
   };
 
   const handleFilterDrive = (driveId: string) => {
-    const d = driveId === 'ALL' ? undefined : driveId;
-    fetchSessions(1, pageSize, d, filterStatus || undefined);
+    const d = driveId === 'ALL' ? null : driveId;
+    fetchSessions(1, pageSize, d, filterStatus);
   };
 
   const handleFilterStatus = (status: string) => {
-    const s = status === 'ALL' ? undefined : status;
-    fetchSessions(1, pageSize, filterDriveId || undefined, s);
+    const s = status === 'ALL' ? null : status;
+    fetchSessions(1, pageSize, filterDriveId, s);
   };
 
   const handleRunComparison = async () => {
@@ -218,11 +219,7 @@ export const StorageHistoryView: React.FC = () => {
             <Eye className="w-3.5 h-3.5" />
           </button>
           <button
-            onClick={() => {
-              if (confirm(`Delete historical scan session ${row.original.id.slice(0, 8)}?`)) {
-                deleteSession(row.original.id);
-              }
-            }}
+            onClick={() => setPendingDeleteSessionId(row.original.id)}
             className="p-1 rounded text-muted hover:text-danger hover:bg-danger/10 transition-colors"
             title="Purge session records"
           >
@@ -317,7 +314,7 @@ export const StorageHistoryView: React.FC = () => {
 
       {/* 3. DIFFERENTIAL COMPARISON RESULT VIEW (When active) */}
       {comparisonResult && (
-        <Card padding="md" className="border-accent/40 bg-[#14161A] space-y-4">
+        <Card padding="md" className="border-accent/40 bg-panel space-y-4">
           <div className="flex items-center justify-between pb-2 border-b border-border">
             <div className="flex items-center gap-2">
               <GitCompare className="w-4 h-4 text-accent" />
@@ -446,7 +443,7 @@ export const StorageHistoryView: React.FC = () => {
             {activeDiffTab === 'categories' && (
               <div className="border border-border rounded overflow-hidden">
                 <table className="w-full text-left text-xs">
-                  <thead className="bg-[#121316] text-muted border-b border-border">
+                  <thead className="bg-elevated text-muted border-b border-border">
                     <tr>
                       <th className="px-3 py-2">Category</th>
                       <th className="px-3 py-2">Baseline (A)</th>
@@ -460,7 +457,7 @@ export const StorageHistoryView: React.FC = () => {
                       <tr key={cat.category} className="hover:bg-elevated/40">
                         <td className="px-3 py-2 font-medium text-primary capitalize flex items-center gap-1.5">
                           <Layers className="w-3.5 h-3.5 text-accent" />
-                          {cat.category}
+                          {cat.category.replace(/_/g, ' ')}
                         </td>
                         <td className="px-3 py-2 font-mono text-secondary">{formatBytes(cat.baselineBytes)}</td>
                         <td className="px-3 py-2 font-mono text-secondary">{formatBytes(cat.targetBytes)}</td>
@@ -485,7 +482,7 @@ export const StorageHistoryView: React.FC = () => {
             {activeDiffTab === 'directories' && (
               <div className="border border-border rounded overflow-hidden">
                 <table className="w-full text-left text-xs">
-                  <thead className="bg-[#121316] text-muted border-b border-border">
+                  <thead className="bg-elevated text-muted border-b border-border">
                     <tr>
                       <th className="px-3 py-2">Directory Path</th>
                       <th className="px-3 py-2">Baseline Size</th>
@@ -528,7 +525,7 @@ export const StorageHistoryView: React.FC = () => {
             {activeDiffTab === 'added' && (
               <div className="border border-border rounded overflow-hidden">
                 <table className="w-full text-left text-xs">
-                  <thead className="bg-[#121316] text-muted border-b border-border">
+                  <thead className="bg-elevated text-muted border-b border-border">
                     <tr>
                       <th className="px-3 py-2">File</th>
                       <th className="px-3 py-2">Location</th>
@@ -565,7 +562,7 @@ export const StorageHistoryView: React.FC = () => {
             {activeDiffTab === 'removed' && (
               <div className="border border-border rounded overflow-hidden">
                 <table className="w-full text-left text-xs">
-                  <thead className="bg-[#121316] text-muted border-b border-border">
+                  <thead className="bg-elevated text-muted border-b border-border">
                     <tr>
                       <th className="px-3 py-2">File</th>
                       <th className="px-3 py-2">Previous Location</th>
@@ -602,7 +599,7 @@ export const StorageHistoryView: React.FC = () => {
             {activeDiffTab === 'modified' && (
               <div className="border border-border rounded overflow-hidden">
                 <table className="w-full text-left text-xs">
-                  <thead className="bg-[#121316] text-muted border-b border-border">
+                  <thead className="bg-elevated text-muted border-b border-border">
                     <tr>
                       <th className="px-3 py-2">File</th>
                       <th className="px-3 py-2">Location</th>
@@ -666,7 +663,7 @@ export const StorageHistoryView: React.FC = () => {
               <select
                 value={filterDriveId || 'ALL'}
                 onChange={(e) => handleFilterDrive(e.target.value)}
-                className="bg-[#15171B] border border-border rounded px-2 py-1 text-xs text-primary focus:outline-none focus:border-accent"
+                className="bg-panel border border-border rounded px-2 py-1 text-xs text-primary focus:outline-none focus:border-accent"
               >
                 <option value="ALL">All Drives</option>
                 {drives.map((d) => (
@@ -680,7 +677,7 @@ export const StorageHistoryView: React.FC = () => {
             <select
               value={filterStatus || 'ALL'}
               onChange={(e) => handleFilterStatus(e.target.value)}
-              className="bg-[#15171B] border border-border rounded px-2 py-1 text-xs text-primary focus:outline-none focus:border-accent"
+              className="bg-panel border border-border rounded px-2 py-1 text-xs text-primary focus:outline-none focus:border-accent"
             >
               <option value="ALL">All Statuses</option>
               <option value="completed">Completed</option>
@@ -785,15 +782,15 @@ export const StorageHistoryView: React.FC = () => {
               </h3>
               <div className="space-y-1.5">
                 {selectedSessionDetails.categories.map((c) => (
-                  <div key={c.category} className="p-2 bg-[#14161A] border border-border rounded text-xs space-y-1">
+                  <div key={c.category} className="p-2 bg-elevated border border-border rounded text-xs space-y-1">
                     <div className="flex justify-between items-center">
-                      <span className="font-medium text-primary capitalize">{c.category}</span>
+                      <span className="font-medium text-primary capitalize">{c.category.replace(/_/g, ' ')}</span>
                       <div className="font-mono text-secondary flex items-center gap-2">
                         <span>{formatBytes(c.totalBytes)}</span>
                         <span className="text-muted">({c.percentageBytes.toFixed(1)}%)</span>
                       </div>
                     </div>
-                    <div className="w-full bg-[#1b1e23] h-1.5 rounded overflow-hidden">
+                    <div className="w-full bg-panel h-1.5 rounded overflow-hidden">
                       <div
                         className="bg-accent h-full rounded"
                         style={{ width: `${Math.min(c.percentageBytes, 100)}%` }}
@@ -812,7 +809,7 @@ export const StorageHistoryView: React.FC = () => {
                 </h3>
                 <div className="border border-border rounded overflow-hidden">
                   <table className="w-full text-left text-xs">
-                    <thead className="bg-[#121316] text-muted border-b border-border">
+                    <thead className="bg-elevated text-muted border-b border-border">
                       <tr>
                         <th className="px-3 py-1.5">Directory</th>
                         <th className="px-3 py-1.5">Files</th>
@@ -869,7 +866,7 @@ export const StorageHistoryView: React.FC = () => {
             <select
               value={snapshotDriveId}
               onChange={(e) => setSnapshotDriveId(e.target.value)}
-              className="w-full bg-[#131518] border border-border rounded px-3 py-2 text-xs text-primary focus:outline-none focus:border-accent"
+              className="w-full bg-elevated border border-border rounded px-3 py-2 text-xs text-primary focus:outline-none focus:border-accent"
             >
               {drives.map((d) => (
                 <option key={d.id} value={d.id}>
@@ -886,10 +883,46 @@ export const StorageHistoryView: React.FC = () => {
               value={snapshotLabel}
               onChange={(e) => setSnapshotLabel(e.target.value)}
               placeholder="e.g. Pre-cleanup baseline or Weekly Snapshot"
-              className="w-full bg-[#131518] border border-border rounded px-3 py-2 text-xs text-primary focus:outline-none focus:border-accent font-sans"
+              className="w-full bg-elevated border border-border rounded px-3 py-2 text-xs text-primary focus:outline-none focus:border-accent font-sans"
             />
           </div>
         </div>
+      </Modal>
+
+      {/* 7. Session Deletion Confirmation Modal */}
+      <Modal
+        isOpen={Boolean(pendingDeleteSessionId)}
+        onClose={() => setPendingDeleteSessionId(null)}
+        title="Delete Scan Session"
+        description="Remove this historical scan session and its indexed file metadata from SQLite."
+        maxWidth="sm"
+        footer={
+          <div className="flex items-center justify-end gap-2">
+            <Button variant="ghost" onClick={() => setPendingDeleteSessionId(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              icon={<Trash2 className="w-3.5 h-3.5" />}
+              onClick={async () => {
+                if (pendingDeleteSessionId) {
+                  await deleteSession(pendingDeleteSessionId);
+                  setPendingDeleteSessionId(null);
+                }
+              }}
+            >
+              Delete Session
+            </Button>
+          </div>
+        }
+      >
+        <p className="text-xs text-secondary leading-relaxed">
+          Permanently purge indexed records for session{' '}
+          <code className="font-mono text-primary font-semibold">
+            {pendingDeleteSessionId?.slice(0, 8)}
+          </code>
+          ? Files on disk are unaffected.
+        </p>
       </Modal>
     </div>
   );

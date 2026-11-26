@@ -73,11 +73,34 @@ interface ScanState {
   setupEventListeners: () => Promise<() => void>;
 }
 
+const EXCLUSIONS_STORAGE_KEY = 'diskatlas_exclusions';
+
+const loadSavedExclusions = (): string[] => {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(EXCLUSIONS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+};
+
+const saveExclusions = (exclusions: string[]) => {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(EXCLUSIONS_STORAGE_KEY, JSON.stringify(exclusions));
+  } catch {
+    // ignore storage quota errors
+  }
+};
+
 export const useScanStore = create<ScanState>((set, get) => ({
   isModalOpen: false,
   targetDriveId: '',
   targetPath: '',
-  exclusions: [],
+  exclusions: loadSavedExclusions(),
 
   activeSessionId: null,
   isScanning: false,
@@ -108,7 +131,10 @@ export const useScanStore = create<ScanState>((set, get) => ({
 
   setTargetPath: (path: string) => set({ targetPath: path }),
   setTargetDriveId: (driveId: string) => set({ targetDriveId: driveId }),
-  setExclusions: (exclusions: string[]) => set({ exclusions }),
+  setExclusions: (exclusions: string[]) => {
+    saveExclusions(exclusions);
+    set({ exclusions });
+  },
 
   startScan: async (pathOverride?: string, driveIdOverride?: string) => {
     const state = get();
@@ -331,12 +357,16 @@ export const useScanStore = create<ScanState>((set, get) => ({
     sortBy: string = 'size',
     sortDesc: boolean = true
   ) => {
-    const targetSessionId = sessionId || get().activeSessionId;
-    if (!targetSessionId) return;
+    const active = get().activeSessionId;
+    const targetSessionId =
+      sessionId ||
+      (active && active !== 'starting' ? active : undefined) ||
+      get().summary?.sessionId ||
+      undefined;
 
-    set({ isLoadingFiles: true });
+    set({ isLoadingFiles: true, error: null });
     const res = await safeInvoke<ScanFilePage>('get_scan_files', {
-      sessionId: targetSessionId,
+      sessionId: targetSessionId || null,
       page,
       pageSize,
       parentPath: parentPath || null,
@@ -367,15 +397,13 @@ export const useScanStore = create<ScanState>((set, get) => ({
       unlistenProgress = await listen<ScanProgress>('scan://progress', (event) => {
         const payload = event.payload;
         set((state) => {
-          // If a scan is currently active, always sync with the running scan progress
+          // Ignore progress events belonging to a different session while tracking an active session
           if (
             state.activeSessionId &&
             state.activeSessionId !== 'starting' &&
             state.activeSessionId !== payload.sessionId
           ) {
-            if (!state.isScanning) {
-              return {};
-            }
+            return {};
           }
           return {
             activeSessionId: payload.sessionId,
@@ -387,34 +415,31 @@ export const useScanStore = create<ScanState>((set, get) => ({
       });
 
       unlistenCompleted = await listen<ScanSummary>('scan://completed', (event) => {
+        const summary = event.payload;
+        const currentSid = get().activeSessionId;
+        if (currentSid && currentSid !== 'starting' && currentSid !== summary.sessionId) {
+          return;
+        }
         stopPolling();
         stopElapsedTimer();
-        const summary = event.payload;
-        set((state) => {
-          if (state.activeSessionId && state.activeSessionId !== 'starting' && state.activeSessionId !== summary.sessionId) {
-            if (!state.isScanning) {
-              return {};
-            }
-          }
-          return {
-            activeSessionId: summary.sessionId,
-            isScanning: false,
-            isPaused: false,
-            summary,
-            progress: state.progress
-              ? {
-                  ...state.progress,
-                  status: summary.status,
-                  filesScanned: summary.totalFiles,
-                  dirsScanned: summary.totalDirs,
-                  bytesScanned: summary.totalBytes,
-                  errorCount: summary.errorCount,
-                  currentFile: null,
-                  elapsedMillis: summary.durationMillis,
-                }
-              : null,
-          };
-        });
+        set((state) => ({
+          activeSessionId: summary.sessionId,
+          isScanning: false,
+          isPaused: false,
+          summary,
+          progress: state.progress
+            ? {
+                ...state.progress,
+                status: summary.status,
+                filesScanned: summary.totalFiles,
+                dirsScanned: summary.totalDirs,
+                bytesScanned: summary.totalBytes,
+                errorCount: summary.errorCount,
+                currentFile: null,
+                elapsedMillis: summary.durationMillis,
+              }
+            : null,
+        }));
 
         // Automatically fetch first page of indexed files
         get().fetchScanFiles(summary.sessionId, 1, 50, undefined, 'size', true);
@@ -443,6 +468,8 @@ export const useScanStore = create<ScanState>((set, get) => ({
     }
 
     return () => {
+      stopPolling();
+      stopElapsedTimer();
       unlistenProgress?.();
       unlistenCompleted?.();
       unlistenError?.();

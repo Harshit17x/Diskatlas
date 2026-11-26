@@ -185,7 +185,7 @@ export const StorageIntelligenceView: React.FC = () => {
           <select
             value={selectedSessionId || ''}
             onChange={(e) => handleSessionChange(e.target.value)}
-            className="bg-[#15171B] border border-border rounded px-2.5 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
+            className="bg-panel border border-border rounded px-2.5 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
           >
             <option value="">Latest Completed Scan</option>
             {sessionsPage?.items.map((s) => (
@@ -199,7 +199,7 @@ export const StorageIntelligenceView: React.FC = () => {
             variant="secondary"
             size="sm"
             icon={<RotateCw className={`w-3.5 h-3.5 ${isLoadingProfile ? 'animate-spin' : ''}`} />}
-            onClick={() => fetchProfile()}
+            onClick={() => fetchProfile(selectedSessionId, true)}
             disabled={isLoadingProfile}
           >
             Refresh
@@ -208,7 +208,7 @@ export const StorageIntelligenceView: React.FC = () => {
       </div>
 
       {/* 2. Safety Philosophy Banner */}
-      <div className="p-3 bg-[#16181C] border border-border rounded flex items-start gap-2.5 text-xs text-secondary">
+      <div className="p-3 bg-panel border border-border rounded flex items-start gap-2.5 text-xs text-secondary">
         <ShieldCheck className="w-4 h-4 text-success shrink-0 mt-0.5" />
         <div className="space-y-0.5 text-[11px] leading-relaxed">
           <span className="font-semibold text-primary block">Storage Ownership Principles:</span>
@@ -275,7 +275,7 @@ export const StorageIntelligenceView: React.FC = () => {
             {profile.findings.map((finding) => (
               <div
                 key={finding.id}
-                className="p-3.5 rounded-lg border border-border bg-[#14161A] space-y-2 flex flex-col justify-between"
+                className="p-3.5 rounded-lg border border-border bg-panel space-y-2 flex flex-col justify-between"
               >
                 <div className="space-y-1">
                   <div className="flex items-center justify-between">
@@ -338,7 +338,7 @@ export const StorageIntelligenceView: React.FC = () => {
             <select
               value={query.riskLevel || 'all'}
               onChange={(e) => handleRiskFilter(e.target.value)}
-              className="bg-[#15171B] border border-border rounded px-2 py-1 text-xs text-primary font-mono focus:outline-none focus:border-accent"
+              className="bg-panel border border-border rounded px-2 py-1 text-xs text-primary font-mono focus:outline-none focus:border-accent"
             >
               <option value="all">All Risk Levels</option>
               <option value="low">Low Risk</option>
@@ -355,7 +355,7 @@ export const StorageIntelligenceView: React.FC = () => {
                 placeholder="Search path, reason..."
                 value={query.search || ''}
                 onChange={(e) => handleSearch(e.target.value)}
-                className="w-full bg-[#15171B] border border-border rounded pl-8 pr-3 py-1 text-xs text-primary placeholder-muted focus:outline-none focus:border-accent font-mono"
+                className="w-full bg-panel border border-border rounded pl-8 pr-3 py-1 text-xs text-primary placeholder-muted focus:outline-none focus:border-accent font-mono"
               />
             </div>
           </div>
@@ -377,7 +377,7 @@ export const StorageIntelligenceView: React.FC = () => {
               className={`px-2.5 py-1 text-xs rounded transition-colors whitespace-nowrap ${
                 (query.group || 'all') === grp.id
                   ? 'bg-accent text-white font-medium'
-                  : 'bg-elevated text-secondary hover:text-primary hover:bg-[#282D35]'
+                  : 'bg-elevated text-secondary hover:text-primary hover:bg-elevated/80'
               }`}
             >
               {grp.label}
@@ -461,7 +461,7 @@ export const StorageIntelligenceView: React.FC = () => {
                     </button>
 
                     {isExpanded && (
-                      <div className="mt-2 p-2.5 rounded bg-[#131518] border border-border/60 space-y-2 text-[11px]">
+                      <div className="mt-2 p-2.5 rounded bg-elevated border border-border/60 space-y-2 text-[11px]">
                         <div className="space-y-0.5">
                           <span className="font-semibold text-primary flex items-center gap-1">
                             <ArrowRight className="w-3 h-3 text-accent" />

@@ -54,7 +54,10 @@ impl DriveDetector {
             for id in existing_ids {
                 if !active_ids.contains(&id.as_str()) {
                     let _ = tx.execute(
-                        "DELETE FROM drives WHERE id = ?1 AND id NOT IN (SELECT drive_id FROM scan_sessions)",
+                        "DELETE FROM drives
+                         WHERE id = ?1
+                           AND id NOT IN (SELECT drive_id FROM scan_sessions)
+                           AND id NOT IN (SELECT drive_id FROM storage_snapshots)",
                         [&id],
                     );
                 }
@@ -356,49 +359,48 @@ mod unix_impl {
     use sysinfo::Disks;
 
     #[cfg(target_os = "macos")]
-    fn get_macos_apfs_container_stats() -> Option<(u64, u64)> {
-        use std::process::Command;
-        let output = Command::new("diskutil")
-            .args(&["info", "/"])
-            .output()
-            .ok()?;
+    fn extract_plist_integer(plist_xml: &str, key: &str) -> Option<u64> {
+        let marker = format!("<key>{}</key>", key);
+        let key_pos = plist_xml.find(&marker)?;
+        let rest = &plist_xml[key_pos + marker.len()..];
+        let start = rest.find("<integer>")? + "<integer>".len();
+        let end = rest[start..].find("</integer>")?;
+        rest[start..start + end].trim().parse::<u64>().ok()
+    }
 
-        if !output.status.success() {
-            return None;
+    #[cfg(target_os = "macos")]
+    fn get_macos_apfs_container_stats(disks: &Disks) -> Option<(u64, u64)> {
+        // Prefer the `/System/Volumes/Data` APFS volume directly via sysinfo (instant & locale-independent).
+        if let Some(data_vol) = disks
+            .list()
+            .iter()
+            .find(|d| d.mount_point().to_string_lossy() == "/System/Volumes/Data")
+        {
+            let total = data_vol.total_space();
+            let avail = data_vol.available_space();
+            if total > 0 {
+                return Some((total, avail));
+            }
         }
 
-        let text = String::from_utf8_lossy(&output.stdout);
-        let mut total_bytes = None;
-        let mut free_bytes = None;
-
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("Container Total Space:") {
-                if let Some(open) = trimmed.find('(') {
-                    if let Some(close) = trimmed[open..].find(" Bytes)") {
-                        let num_str = &trimmed[open + 1..open + close];
-                        if let Ok(b) = num_str.parse::<u64>() {
-                            total_bytes = Some(b);
-                        }
-                    }
-                }
-            } else if trimmed.starts_with("Container Free Space:") {
-                if let Some(open) = trimmed.find('(') {
-                    if let Some(close) = trimmed[open..].find(" Bytes)") {
-                        let num_str = &trimmed[open + 1..open + close];
-                        if let Ok(b) = num_str.parse::<u64>() {
-                            free_bytes = Some(b);
-                        }
-                    }
+        // Fall back to locale-independent XML plist output from `diskutil info -plist /`.
+        use std::process::Command;
+        if let Ok(output) = Command::new("diskutil").args(["info", "-plist", "/"]).output() {
+            if output.status.success() {
+                let plist = String::from_utf8_lossy(&output.stdout);
+                let total = extract_plist_integer(&plist, "APFSContainerSize")
+                    .or_else(|| extract_plist_integer(&plist, "TotalSize"))
+                    .or_else(|| extract_plist_integer(&plist, "VolumeTotalSpace"));
+                let free = extract_plist_integer(&plist, "APFSContainerFree")
+                    .or_else(|| extract_plist_integer(&plist, "FreeSpace"))
+                    .or_else(|| extract_plist_integer(&plist, "VolumeAvailableSpace"));
+                if let (Some(t), Some(f)) = (total, free) {
+                    return Some((t, f));
                 }
             }
         }
 
-        if let (Some(t), Some(f)) = (total_bytes, free_bytes) {
-            Some((t, f))
-        } else {
-            None
-        }
+        None
     }
 
     pub fn detect_unix_drives() -> Vec<DriveInfo> {
@@ -441,7 +443,7 @@ mod unix_impl {
 
             #[cfg(target_os = "macos")]
             let (total_raw, avail_raw) = if is_system {
-                if let Some((ct, cf)) = get_macos_apfs_container_stats() {
+                if let Some((ct, cf)) = get_macos_apfs_container_stats(&disks) {
                     (ct, cf)
                 } else {
                     (disk.total_space(), disk.available_space())

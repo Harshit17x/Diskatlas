@@ -9,6 +9,7 @@ use tracing::{info, warn};
 
 use crate::error::Result;
 use crate::models::analysis::*;
+use crate::storage::DbPool;
 
 pub struct AnalysisService;
 
@@ -18,7 +19,7 @@ impl AnalysisService {
         conn: &Connection,
         query: LargeFilesQuery,
     ) -> Result<LargeFilesResponse> {
-        let session_id = Self::resolve_session_id(conn, query.session_id.as_deref())?;
+        let session_id = crate::storage::resolve_session_id(conn, query.session_id.as_deref())?;
 
         let min_size = query.min_size_bytes.unwrap_or(50 * 1024 * 1024); // default 50 MB
         let page = query.page.max(1);
@@ -28,11 +29,14 @@ impl AnalysisService {
         // Build base condition
         let mut conditions = vec![
             "session_id = ?1".to_string(),
-            format!("size_bytes >= {}", min_size),
+            "size_bytes >= ?2".to_string(),
         ];
 
-        let mut param_index = 2;
-        let mut params_vec: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Text(session_id.clone())];
+        let mut param_index = 3;
+        let mut params_vec: Vec<rusqlite::types::Value> = vec![
+            rusqlite::types::Value::Text(session_id.clone()),
+            rusqlite::types::Value::Integer(min_size),
+        ];
 
         if let Some(ext) = &query.extension {
             let clean_ext = ext.trim().trim_start_matches('.').to_lowercase();
@@ -46,8 +50,9 @@ impl AnalysisService {
         if let Some(path_filter) = &query.path_filter {
             let clean_path = path_filter.trim();
             if !clean_path.is_empty() {
-                conditions.push(format!("path LIKE ?{}", param_index));
-                params_vec.push(rusqlite::types::Value::Text(format!("{}%", clean_path)));
+                let escaped = crate::storage::escape_like_pattern(clean_path);
+                conditions.push(format!("path LIKE ?{} ESCAPE '\\'", param_index));
+                params_vec.push(rusqlite::types::Value::Text(format!("{}%", escaped)));
             }
         }
 
@@ -127,22 +132,107 @@ impl AnalysisService {
         conn: &Connection,
         query: HiddenFilesQuery,
     ) -> Result<HiddenFilesResponse> {
-        let session_id = Self::resolve_session_id(conn, query.session_id.as_deref())?;
+        let session_id = crate::storage::resolve_session_id(conn, query.session_id.as_deref())?;
 
         let page = query.page.max(1);
         let page_size = query.page_size.clamp(1, 200);
         let offset = (page - 1) * page_size;
 
-        // Query candidates: files that have hidden/system flag, dot-prefixed, or inside standard hidden dirs
-        let sql = "SELECT id, path, name, size_bytes, modified_at, is_hidden, is_system
-                   FROM files
-                   WHERE session_id = ?1 AND (
-                       is_hidden = 1 OR is_system = 1 OR name LIKE '.%' OR
-                       path LIKE '%AppData%' OR path LIKE '%.cache%' OR path LIKE '%/Library/%'
-                   )";
+        // Shared SQL classification expression matching `classify_hidden_item`.
+        // Uses `instr` instead of `LIKE` for Windows backslashes to avoid escape ambiguity.
+        let hidden_type_expr = "CASE
+            WHEN is_system = 1
+              OR instr(lower(path), 'system volume information') > 0
+              OR instr(lower(path), '$recycle.bin') > 0
+              OR instr(lower(path), 'windows\\system32') > 0
+              OR instr(lower(path), 'windows/system32') > 0
+              OR lower(path) LIKE '/system%'
+              OR lower(path) LIKE '/private%'
+              OR lower(path) LIKE '/usr%'
+            THEN 'system_protected'
+            WHEN instr(lower(path), 'appdata') > 0
+              OR instr(lower(path), '/library/caches') > 0
+              OR instr(lower(path), '.cache') > 0
+            THEN 'app_hidden'
+            WHEN name LIKE '.%'
+            THEN 'dotfile'
+            ELSE 'user_hidden'
+        END";
 
-        let mut stmt = conn.prepare(sql)?;
-        let rows = stmt.query_map([&session_id], |row| {
+        let base_cond = "session_id = ?1 AND (
+            is_hidden = 1 OR is_system = 1 OR name LIKE '.%' OR
+            instr(lower(path), 'appdata') > 0 OR instr(lower(path), '.cache') > 0 OR instr(lower(path), '/library/') > 0
+        )";
+
+        // Compute overall tier byte totals in SQL
+        let totals_sql = format!(
+            "SELECT
+                COALESCE(SUM(CASE WHEN ({t}) = 'system_protected' THEN size_bytes ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN ({t}) = 'dotfile' THEN size_bytes ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN ({t}) NOT IN ('system_protected', 'dotfile') THEN size_bytes ELSE 0 END), 0)
+             FROM files
+             WHERE {base}",
+            t = hidden_type_expr,
+            base = base_cond
+        );
+        let (system_protected_bytes, dotfiles_bytes, user_hidden_bytes): (i64, i64, i64) =
+            conn.query_row(&totals_sql, [&session_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+
+        // Build filtered WHERE clause for pagination & filtered totals
+        let mut conditions = vec![base_cond.to_string()];
+        let mut params_vec: Vec<rusqlite::types::Value> =
+            vec![rusqlite::types::Value::Text(session_id)];
+        let mut p_idx = 2;
+
+        if let Some(filter) = &query.filter_type {
+            if filter != "all" {
+                conditions.push(format!("({}) = ?{}", hidden_type_expr, p_idx));
+                params_vec.push(rusqlite::types::Value::Text(filter.clone()));
+                p_idx += 1;
+            }
+        }
+
+        if let Some(search) = &query.search {
+            let term = search.trim().to_lowercase();
+            if !term.is_empty() {
+                conditions.push(format!(
+                    "(instr(lower(name), ?{p}) > 0 OR instr(lower(path), ?{p}) > 0)",
+                    p = p_idx
+                ));
+                params_vec.push(rusqlite::types::Value::Text(term));
+            }
+        }
+
+        let where_clause = conditions.join(" AND ");
+        let count_sql = format!(
+            "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM files WHERE {}",
+            where_clause
+        );
+        let (total_items, total_bytes): (i64, i64) = conn.query_row(
+            &count_sql,
+            rusqlite::params_from_iter(params_vec.iter()),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        let total_pages = if total_items == 0 {
+            1
+        } else {
+            ((total_items as f64) / (page_size as f64)).ceil() as u32
+        };
+
+        let page_sql = format!(
+            "SELECT id, path, name, size_bytes, modified_at, is_hidden, is_system
+             FROM files
+             WHERE {}
+             ORDER BY size_bytes DESC
+             LIMIT {} OFFSET {}",
+            where_clause, page_size, offset
+        );
+
+        let mut stmt = conn.prepare(&page_sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params_vec.iter()), |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
@@ -154,23 +244,13 @@ impl AnalysisService {
             ))
         })?;
 
-        let mut all_hidden: Vec<HiddenItem> = Vec::new();
-        let mut system_protected_bytes = 0i64;
-        let mut user_hidden_bytes = 0i64;
-        let mut dotfiles_bytes = 0i64;
-
+        let mut paginated_items = Vec::new();
         for r in rows {
             let (id, path, name, size_bytes, modified_at, is_hidden, is_system) = r?;
+            let (hidden_type, protection_level, safety_note) =
+                Self::classify_hidden_item(&path, &name, is_system, is_hidden);
 
-            let (hidden_type, protection_level, safety_note) = Self::classify_hidden_item(&path, &name, is_system, is_hidden);
-
-            match hidden_type.as_str() {
-                "system_protected" => system_protected_bytes += size_bytes,
-                "dotfile" => dotfiles_bytes += size_bytes,
-                _ => user_hidden_bytes += size_bytes,
-            }
-
-            all_hidden.push(HiddenItem {
+            paginated_items.push(HiddenItem {
                 id,
                 path,
                 name,
@@ -182,41 +262,6 @@ impl AnalysisService {
                 safety_note,
             });
         }
-
-        // Apply filter_type if requested
-        if let Some(filter) = &query.filter_type {
-            if filter != "all" {
-                all_hidden.retain(|h| &h.hidden_type == filter);
-            }
-        }
-
-        // Apply text search
-        if let Some(search) = &query.search {
-            let term = search.to_lowercase();
-            if !term.is_empty() {
-                all_hidden.retain(|h| h.name.to_lowercase().contains(&term) || h.path.to_lowercase().contains(&term));
-            }
-        }
-
-        // Sort largest first
-        all_hidden.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
-
-        let total_items = all_hidden.len() as i64;
-        let total_bytes = all_hidden.iter().map(|h| h.size_bytes).sum();
-        let total_pages = if total_items == 0 {
-            1
-        } else {
-            ((total_items as f64) / (page_size as f64)).ceil() as u32
-        };
-
-        // Paginate slice
-        let start = offset as usize;
-        let paginated_items = if start >= all_hidden.len() {
-            Vec::new()
-        } else {
-            let end = (start + page_size as usize).min(all_hidden.len());
-            all_hidden[start..end].to_vec()
-        };
 
         Ok(HiddenFilesResponse {
             items: paginated_items,
@@ -231,7 +276,52 @@ impl AnalysisService {
         })
     }
 
-    /// 3. STAGED DUPLICATE DETECTION:
+    /// Pool-backed duplicate detection that performs disk SHA-256 I/O outside any SQLite lock.
+    pub fn find_duplicates_pool(
+        db_pool: &DbPool,
+        query: DuplicateSearchQuery,
+    ) -> Result<DuplicateSearchResponse> {
+        let min_size = query.min_size_bytes.unwrap_or(1024 * 1024);
+        let limit_groups = query.limit_groups.unwrap_or(100) as usize;
+        let clean_ext = query.extension.as_ref().and_then(|ext| {
+            let c = ext.trim().trim_start_matches('.').to_lowercase();
+            if c.is_empty() { None } else { Some(c) }
+        });
+
+        let (candidates, cached_hashes) = db_pool.with_read_conn(|conn| {
+            let session_id = crate::storage::resolve_session_id(conn, query.session_id.as_deref())?;
+            info!(session_id = %session_id, min_size = min_size, "Starting staged duplicate detection");
+            Self::load_duplicate_candidates(conn, &session_id, min_size, clean_ext.as_deref())
+        })?;
+
+        let mut hash_to_files: HashMap<String, Vec<DuplicateFileItem>> = HashMap::new();
+        let mut newly_computed: Vec<(String, i64, i64, String)> = Vec::new();
+
+        for (idx, item) in candidates.into_iter().enumerate() {
+            if let Some(Some(hash)) = cached_hashes.get(idx) {
+                hash_to_files.entry(hash.clone()).or_default().push(item);
+                continue;
+            }
+            let modified = item.modified_at.unwrap_or(0);
+            if let Some((hash, from_disk)) = Self::compute_file_hash(&item.path, item.size_bytes) {
+                if from_disk {
+                    newly_computed.push((item.path.clone(), item.size_bytes, modified, hash.clone()));
+                }
+                hash_to_files.entry(hash).or_default().push(item);
+            }
+        }
+
+        if !newly_computed.is_empty() {
+            let conn = db_pool.lock_conn();
+            let tx = conn.unchecked_transaction()?;
+            Self::cache_computed_hashes(&tx, &newly_computed)?;
+            tx.commit()?;
+        }
+
+        Ok(Self::build_duplicate_response(hash_to_files, limit_groups))
+    }
+
+    /// 3. STAGED DUPLICATE DETECTION (Connection-backed helper for synchronous callers/tests):
     /// Stage 1: Filter by size groups (identical size_bytes)
     /// Stage 2: Verify candidate metadata
     /// Stage 3: Hash candidate files with streaming SHA-256 (leveraging file_hashes table)
@@ -240,80 +330,134 @@ impl AnalysisService {
         conn: &Connection,
         query: DuplicateSearchQuery,
     ) -> Result<DuplicateSearchResponse> {
-        let session_id = Self::resolve_session_id(conn, query.session_id.as_deref())?;
+        let session_id = crate::storage::resolve_session_id(conn, query.session_id.as_deref())?;
         let min_size = query.min_size_bytes.unwrap_or(1024 * 1024); // default 1 MB
         let limit_groups = query.limit_groups.unwrap_or(100) as usize;
-
-        info!(session_id = %session_id, min_size = min_size, "Starting staged duplicate detection");
-
-        // STAGE 1: Find all size_bytes with COUNT(*) > 1 (strictly parameterized)
         let clean_ext = query.extension.as_ref().and_then(|ext| {
             let c = ext.trim().trim_start_matches('.').to_lowercase();
             if c.is_empty() { None } else { Some(c) }
         });
 
-        let size_buckets: Vec<i64> = if let Some(ref ext) = clean_ext {
-            let stage1_sql = "SELECT size_bytes, COUNT(*) as cnt
-                              FROM files
-                              WHERE session_id = ?1 AND size_bytes >= ?2 AND LOWER(extension) = ?3
-                              GROUP BY size_bytes
-                              HAVING cnt > 1
-                              ORDER BY size_bytes DESC";
-            let mut stmt = conn.prepare(stage1_sql)?;
-            let rows = stmt.query_map(params![&session_id, min_size, ext], |row| row.get(0))?;
-            let buckets: Vec<i64> = rows.filter_map(|r| r.ok()).collect();
-            drop(stmt);
-            buckets
+        info!(session_id = %session_id, min_size = min_size, "Starting staged duplicate detection");
+
+        let (candidates, cached_hashes) =
+            Self::load_duplicate_candidates(conn, &session_id, min_size, clean_ext.as_deref())?;
+
+        let mut hash_to_files: HashMap<String, Vec<DuplicateFileItem>> = HashMap::new();
+        let mut newly_computed: Vec<(String, i64, i64, String)> = Vec::new();
+
+        for (idx, item) in candidates.into_iter().enumerate() {
+            if let Some(Some(hash)) = cached_hashes.get(idx) {
+                hash_to_files.entry(hash.clone()).or_default().push(item);
+                continue;
+            }
+            let modified = item.modified_at.unwrap_or(0);
+            if let Some((hash, from_disk)) = Self::compute_file_hash(&item.path, item.size_bytes) {
+                if from_disk {
+                    newly_computed.push((item.path.clone(), item.size_bytes, modified, hash.clone()));
+                }
+                hash_to_files.entry(hash).or_default().push(item);
+            }
+        }
+
+        if !newly_computed.is_empty() {
+            Self::cache_computed_hashes(conn, &newly_computed)?;
+        }
+
+        Ok(Self::build_duplicate_response(hash_to_files, limit_groups))
+    }
+
+    fn load_duplicate_candidates(
+        conn: &Connection,
+        session_id: &str,
+        min_size: i64,
+        clean_ext: Option<&str>,
+    ) -> Result<(Vec<DuplicateFileItem>, Vec<Option<String>>)> {
+        let size_buckets: Vec<i64> = if let Some(ext) = clean_ext {
+            let mut stmt = conn.prepare(
+                "SELECT size_bytes
+                 FROM files
+                 WHERE session_id = ?1 AND size_bytes >= ?2 AND LOWER(extension) = ?3
+                 GROUP BY size_bytes
+                 HAVING COUNT(*) > 1
+                 ORDER BY size_bytes DESC",
+            )?;
+            let rows = stmt.query_map(params![session_id, min_size, ext], |row| row.get(0))?;
+            rows.filter_map(|r| r.ok()).collect()
         } else {
-            let stage1_sql = "SELECT size_bytes, COUNT(*) as cnt
-                              FROM files
-                              WHERE session_id = ?1 AND size_bytes >= ?2
-                              GROUP BY size_bytes
-                              HAVING cnt > 1
-                              ORDER BY size_bytes DESC";
-            let mut stmt = conn.prepare(stage1_sql)?;
-            let rows = stmt.query_map(params![&session_id, min_size], |row| row.get(0))?;
-            let buckets: Vec<i64> = rows.filter_map(|r| r.ok()).collect();
-            drop(stmt);
-            buckets
+            let mut stmt = conn.prepare(
+                "SELECT size_bytes
+                 FROM files
+                 WHERE session_id = ?1 AND size_bytes >= ?2
+                 GROUP BY size_bytes
+                 HAVING COUNT(*) > 1
+                 ORDER BY size_bytes DESC",
+            )?;
+            let rows = stmt.query_map(params![session_id, min_size], |row| row.get(0))?;
+            rows.filter_map(|r| r.ok()).collect()
         };
 
         info!(buckets_count = size_buckets.len(), "Stage 1 complete: candidate size buckets identified");
 
-        // STAGE 2 & 3: For each bucket, inspect candidates and hash with SHA-256
-        let mut hash_to_files: HashMap<String, Vec<DuplicateFileItem>> = HashMap::new();
+        let mut file_stmt = conn.prepare(
+            "SELECT f.id, f.path, f.name, f.size_bytes, f.modified_at, f.created_at, fh.sha256
+             FROM files f
+             LEFT JOIN file_hashes fh
+               ON f.path = fh.path
+              AND f.size_bytes = fh.size_bytes
+              AND COALESCE(f.modified_at, 0) = fh.modified_at
+             WHERE f.session_id = ?1 AND f.size_bytes = ?2",
+        )?;
 
+        let mut candidates = Vec::new();
+        let mut cached = Vec::new();
         for size in size_buckets {
-            let mut file_stmt = conn.prepare(
-                "SELECT id, path, name, size_bytes, modified_at, created_at
-                 FROM files
-                 WHERE session_id = ?1 AND size_bytes = ?2"
-            )?;
-
-            let candidate_files: Vec<DuplicateFileItem> = file_stmt
-                .query_map(params![&session_id, size], |row| {
-                    Ok(DuplicateFileItem {
+            let rows = file_stmt.query_map(params![session_id, size], |row| {
+                Ok((
+                    DuplicateFileItem {
                         id: row.get(0)?,
                         path: row.get(1)?,
                         name: row.get(2)?,
                         size_bytes: row.get(3)?,
                         modified_at: row.get(4)?,
                         created_at: row.get(5)?,
-                    })
-                })?
-                .filter_map(|r| r.ok())
-                .collect();
-
-            // Hash each candidate file
-            for file_item in candidate_files {
-                let file_hash = Self::get_or_compute_file_hash(conn, &file_item.path, file_item.size_bytes, file_item.modified_at.unwrap_or(0));
-                if let Some(hash) = file_hash {
-                    hash_to_files.entry(hash).or_default().push(file_item);
+                    },
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            })?;
+            for r in rows {
+                if let Ok((item, sha)) = r {
+                    candidates.push(item);
+                    cached.push(sha);
                 }
             }
         }
 
-        // STAGE 4: Filter groups where duplicates exist (len >= 2)
+        Ok((candidates, cached))
+    }
+
+    fn cache_computed_hashes(
+        conn: &Connection,
+        entries: &[(String, i64, i64, String)],
+    ) -> Result<()> {
+        let mut stmt = conn.prepare_cached(
+            "INSERT INTO file_hashes (path, size_bytes, modified_at, sha256)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(path) DO UPDATE SET
+                size_bytes = excluded.size_bytes,
+                modified_at = excluded.modified_at,
+                sha256 = excluded.sha256",
+        )?;
+        for (path, size_bytes, modified_at, hash) in entries {
+            let _ = stmt.execute(params![path, size_bytes, modified_at, hash]);
+        }
+        Ok(())
+    }
+
+    fn build_duplicate_response(
+        hash_to_files: HashMap<String, Vec<DuplicateFileItem>>,
+        limit_groups: usize,
+    ) -> DuplicateSearchResponse {
         let mut duplicate_groups: Vec<DuplicateGroup> = Vec::new();
         let mut total_duplicate_files = 0usize;
         let mut total_wasted_bytes = 0i64;
@@ -339,19 +483,18 @@ impl AnalysisService {
             }
         }
 
-        // Sort groups by wasted bytes descending
         duplicate_groups.sort_by(|a, b| b.wasted_bytes.cmp(&a.wasted_bytes));
         duplicate_groups.truncate(limit_groups);
 
         let groups_count = duplicate_groups.len();
 
-        Ok(DuplicateSearchResponse {
+        DuplicateSearchResponse {
             groups: duplicate_groups,
             total_duplicate_files,
             total_wasted_bytes,
             groups_count,
             hashing_algorithm: "SHA-256 (Staged Size-First Streaming)".to_string(),
-        })
+        }
     }
 
     /// 4. FORGOTTEN FILES MODULE: Heuristically identify old downloads, installers, archives, backups, and stale build outputs
@@ -359,7 +502,7 @@ impl AnalysisService {
         conn: &Connection,
         query: ForgottenFilesQuery,
     ) -> Result<ForgottenFilesResponse> {
-        let session_id = Self::resolve_session_id(conn, query.session_id.as_deref())?;
+        let session_id = crate::storage::resolve_session_id(conn, query.session_id.as_deref())?;
 
         let min_age_days = query.min_age_days.unwrap_or(90);
         let page = query.page.max(1);
@@ -373,14 +516,75 @@ impl AnalysisService {
 
         let threshold_epoch = now_epoch - (min_age_days * 86400);
 
-        // Fetch candidate files modified before threshold_epoch
-        let sql = "SELECT id, path, name, extension, size_bytes, modified_at, category
-                   FROM files
-                   WHERE session_id = ?1 AND modified_at IS NOT NULL AND modified_at < ?2 AND size_bytes > 1024
-                   ORDER BY size_bytes DESC";
+        let signal_expr = "CASE
+            WHEN COALESCE(category, '') = 'downloads'
+              OR instr(lower(path), 'downloads') > 0
+            THEN 'old_download'
+            WHEN lower(COALESCE(extension, '')) IN ('exe', 'msi', 'dmg', 'pkg', 'iso', 'deb', 'rpm')
+            THEN 'old_installer'
+            WHEN lower(COALESCE(extension, '')) IN ('zip', 'tar', 'gz', 'tgz', '7z', 'rar', 'bz2', 'xz')
+              OR COALESCE(category, '') = 'archives'
+            THEN 'old_archive'
+            WHEN lower(COALESCE(extension, '')) IN ('bak', 'backup', 'old', 'orig', 'tmp')
+              OR instr(lower(name), 'copy') > 0
+              OR instr(name, ' - Copy') > 0
+            THEN 'old_backup'
+            WHEN instr(lower(replace(path, '\\', '/')), '/target/') > 0
+              OR instr(lower(replace(path, '\\', '/')), '/build/') > 0
+              OR instr(lower(replace(path, '\\', '/')), '/dist/') > 0
+              OR instr(lower(path), 'node_modules') > 0
+            THEN 'stale_build_artifact'
+            ELSE NULL
+        END";
 
-        let mut stmt = conn.prepare(sql)?;
-        let rows = stmt.query_map(params![&session_id, threshold_epoch], |row| {
+        let mut conditions = vec![
+            "session_id = ?1".to_string(),
+            "modified_at IS NOT NULL".to_string(),
+            "modified_at < ?2".to_string(),
+            "size_bytes > 1024".to_string(),
+            format!("({}) IS NOT NULL", signal_expr),
+        ];
+        let mut params_vec: Vec<rusqlite::types::Value> = vec![
+            rusqlite::types::Value::Text(session_id),
+            rusqlite::types::Value::Integer(threshold_epoch),
+        ];
+
+        if let Some(target_signal) = &query.signal_type {
+            let trimmed = target_signal.trim();
+            if !trimmed.is_empty() && trimmed != "all" {
+                conditions.push(format!("({}) = ?3", signal_expr));
+                params_vec.push(rusqlite::types::Value::Text(trimmed.to_string()));
+            }
+        }
+
+        let where_clause = conditions.join(" AND ");
+        let count_sql = format!(
+            "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM files WHERE {}",
+            where_clause
+        );
+        let (total_items, total_bytes): (i64, i64) = conn.query_row(
+            &count_sql,
+            rusqlite::params_from_iter(params_vec.iter()),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        let total_pages = if total_items == 0 {
+            1
+        } else {
+            ((total_items as f64) / (page_size as f64)).ceil() as u32
+        };
+
+        let page_sql = format!(
+            "SELECT id, path, name, extension, size_bytes, modified_at, ({}) AS signal_type
+             FROM files
+             WHERE {}
+             ORDER BY size_bytes DESC
+             LIMIT {} OFFSET {}",
+            signal_expr, where_clause, page_size, offset
+        );
+
+        let mut stmt = conn.prepare(&page_sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params_vec.iter()), |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
@@ -388,64 +592,22 @@ impl AnalysisService {
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, i64>(4)?,
                 row.get::<_, Option<i64>>(5)?,
-                row.get::<_, Option<String>>(6)?,
+                row.get::<_, String>(6)?,
             ))
         })?;
 
-        let mut forgotten_items: Vec<ForgottenFileItem> = Vec::new();
-
+        let mut paginated_items = Vec::new();
         for r in rows {
-            let (id, path, name, extension, size_bytes, modified_at, category) = r?;
+            let (id, path, name, extension, size_bytes, modified_at, signal_type) = r?;
             let mod_time = modified_at.unwrap_or(0);
             let age_days = if mod_time > 0 {
                 (now_epoch - mod_time) / 86400
             } else {
                 min_age_days
             };
+            let safety_heuristic = Self::forgotten_safety_note(&signal_type).to_string();
 
-            let ext = extension.as_deref().unwrap_or("").to_lowercase();
-            let cat = category.as_deref().unwrap_or("");
-
-            let (signal_type, safety_heuristic) = if cat == "downloads" || path.contains("Downloads") || path.contains("downloads") {
-                (
-                    "old_download".to_string(),
-                    "Downloaded item untouched for months. Software may already be installed or file processed.".to_string(),
-                )
-            } else if matches!(ext.as_str(), "exe" | "msi" | "dmg" | "pkg" | "iso" | "deb" | "rpm") {
-                (
-                    "old_installer".to_string(),
-                    "Standalone application installer or OS disk image. Original installation has likely concluded.".to_string(),
-                )
-            } else if matches!(ext.as_str(), "zip" | "tar" | "gz" | "tgz" | "7z" | "rar" | "bz2" | "xz") {
-                (
-                    "old_archive".to_string(),
-                    "Archive file unmodified over threshold. Extracted contents may already reside on disk.".to_string(),
-                )
-            } else if matches!(ext.as_str(), "bak" | "backup" | "old" | "orig" | "tmp")
-                || name.to_lowercase().contains("copy")
-                || name.contains(" - Copy")
-            {
-                (
-                    "old_backup".to_string(),
-                    "Manual backup or duplicate copy file. Verify if superseded by main version.".to_string(),
-                )
-            } else if path.contains("/target/") || path.contains("/build/") || path.contains("/dist/") || path.contains("node_modules") {
-                (
-                    "stale_build_artifact".to_string(),
-                    "Compiled project artifact in an inactive repository. Can be rebuilt from source code.".to_string(),
-                )
-            } else {
-                continue; // Not a designated forgotten signal
-            };
-
-            // Filter by signal_type if specified
-            if let Some(target_signal) = &query.signal_type {
-                if &signal_type != target_signal {
-                    continue;
-                }
-            }
-
-            forgotten_items.push(ForgottenFileItem {
+            paginated_items.push(ForgottenFileItem {
                 id,
                 path,
                 name,
@@ -458,22 +620,6 @@ impl AnalysisService {
             });
         }
 
-        let total_items = forgotten_items.len() as i64;
-        let total_bytes = forgotten_items.iter().map(|f| f.size_bytes).sum();
-        let total_pages = if total_items == 0 {
-            1
-        } else {
-            ((total_items as f64) / (page_size as f64)).ceil() as u32
-        };
-
-        let start = offset as usize;
-        let paginated_items = if start >= forgotten_items.len() {
-            Vec::new()
-        } else {
-            let end = (start + page_size as usize).min(forgotten_items.len());
-            forgotten_items[start..end].to_vec()
-        };
-
         Ok(ForgottenFilesResponse {
             items: paginated_items,
             total_items,
@@ -484,12 +630,23 @@ impl AnalysisService {
         })
     }
 
+    fn forgotten_safety_note(signal_type: &str) -> &'static str {
+        match signal_type {
+            "old_download" => "Downloaded item untouched for months. Software may already be installed or file processed.",
+            "old_installer" => "Standalone application installer or OS disk image. Original installation has likely concluded.",
+            "old_archive" => "Archive file unmodified over threshold. Extracted contents may already reside on disk.",
+            "old_backup" => "Manual backup or duplicate copy file. Verify if superseded by main version.",
+            "stale_build_artifact" => "Compiled project artifact in an inactive repository. Can be rebuilt from source code.",
+            _ => "Aged item identified by forgotten-storage heuristics.",
+        }
+    }
+
     /// 5. UNKNOWN STORAGE MODULE: Identify unclassified files and directory rollups with confidence tracking
     pub fn get_unknown_storage(
         conn: &Connection,
         session_id: Option<&str>,
     ) -> Result<UnknownStorageResponse> {
-        let sid = Self::resolve_session_id(conn, session_id)?;
+        let sid = crate::storage::resolve_session_id(conn, session_id)?;
 
         // Top unknown files
         let sql = "SELECT path, size_bytes, extension, modified_at, confidence
@@ -576,6 +733,7 @@ impl AnalysisService {
             || p_lower.contains("system volume information")
             || p_lower.contains("$recycle.bin")
             || p_lower.contains("windows\\system32")
+            || p_lower.contains("windows/system32")
             || p_lower.starts_with("/system")
             || p_lower.starts_with("/private")
             || p_lower.starts_with("/usr")
@@ -612,58 +770,16 @@ impl AnalysisService {
         }
     }
 
-    /// Resolves target session id, falling back to latest session
-    fn resolve_session_id(conn: &Connection, requested: Option<&str>) -> Result<String> {
-        if let Some(id) = requested {
-            return Ok(id.to_string());
-        }
-
-        let latest: Option<String> = conn
-            .query_row(
-                "SELECT id FROM scan_sessions ORDER BY started_at DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .ok();
-
-        match latest {
-            Some(id) => Ok(id),
-            None => Err(crate::error::AppError::NotFound(
-                "No completed scan sessions found in database".to_string(),
-            )),
-        }
-    }
-
-    /// Looks up cached cryptographic hash or streams file from disk
-    fn get_or_compute_file_hash(
-        conn: &Connection,
-        path: &str,
-        size_bytes: i64,
-        modified_at: i64,
-    ) -> Option<String> {
-        // 1. Check cache in file_hashes table
-        let cached: Option<String> = conn
-            .query_row(
-                "SELECT sha256 FROM file_hashes WHERE path = ?1 AND size_bytes = ?2 AND modified_at = ?3",
-                params![path, size_bytes, modified_at],
-                |row| row.get(0),
-            )
-            .ok();
-
-        if let Some(hash) = cached {
-            return Some(hash);
-        }
-
-        // 2. Compute hash from disk via streaming SHA-256
+    /// Streams a file from disk (or computes deterministic fallback if absent) without touching DB locks.
+    /// Returns `(sha256, from_disk)`.
+    fn compute_file_hash(path: &str, size_bytes: i64) -> Option<(String, bool)> {
         let file_path = Path::new(path);
         if !file_path.exists() {
-            // For synthetic test databases or moved files:
             // Fall back to a deterministic path+size hash so unit tests can execute without real disk files
             let mut hasher = Sha256::new();
             hasher.update(path.as_bytes());
             hasher.update(size_bytes.to_le_bytes());
-            let hash = hex::encode(hasher.finalize());
-            return Some(hash);
+            return Some((hex::encode(hasher.finalize()), false));
         }
 
         match File::open(file_path) {
@@ -682,20 +798,7 @@ impl AnalysisService {
                     }
                 }
 
-                let hash = hex::encode(hasher.finalize());
-
-                // Cache in SQLite
-                let _ = conn.execute(
-                    "INSERT INTO file_hashes (path, size_bytes, modified_at, sha256)
-                     VALUES (?1, ?2, ?3, ?4)
-                     ON CONFLICT(path) DO UPDATE SET
-                        size_bytes = excluded.size_bytes,
-                        modified_at = excluded.modified_at,
-                        sha256 = excluded.sha256",
-                    params![path, size_bytes, modified_at, hash],
-                );
-
-                Some(hash)
+                Some((hex::encode(hasher.finalize()), true))
             }
             Err(e) => {
                 warn!(path = %path, error = %e, "Permission denied or failed to open candidate duplicate file");

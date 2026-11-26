@@ -39,7 +39,7 @@ export function DataTable<TData, TValue>({
         <table className="w-full text-left border-collapse text-xs">
           <thead>
             {table.getHeaderGroups().map((headerGroup) => (
-              <tr key={headerGroup.id} className="border-b border-border bg-[#171A1F]">
+              <tr key={headerGroup.id} className="border-b border-border bg-elevated">
                 {headerGroup.headers.map((header) => {
                   const canSort = header.column.getCanSort();
                   const sorted = header.column.getIsSorted();
@@ -81,7 +81,7 @@ export function DataTable<TData, TValue>({
                   key={row.id}
                   onClick={() => onRowClick && onRowClick(row.original)}
                   className={`border-b border-border last:border-0 transition-colors ${
-                    onRowClick ? 'cursor-pointer hover:bg-elevated' : 'hover:bg-[#1E2127]'
+                    onRowClick ? 'cursor-pointer hover:bg-elevated' : 'hover:bg-elevated/60'
                   }`}
                 >
                   {row.getVisibleCells().map((cell) => (

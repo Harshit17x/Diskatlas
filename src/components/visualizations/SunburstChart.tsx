@@ -58,17 +58,24 @@ export const SunburstChart: React.FC<SunburstProps> = ({
 
   useEffect(() => {
     if (!containerRef.current) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const w = entry.contentRect.width;
         const h = Math.max(entry.contentRect.height, 480);
         if (w > 0) {
-          setDimensions({ width: w, height: h });
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(() => {
+            setDimensions({ width: w, height: h });
+          }, 100);
         }
       }
     });
     observer.observe(containerRef.current);
-    return () => observer.disconnect();
+    return () => {
+      if (timer) clearTimeout(timer);
+      observer.disconnect();
+    };
   }, []);
 
   useEffect(() => {
@@ -134,7 +141,7 @@ export const SunburstChart: React.FC<SunburstProps> = ({
       .on('click', (_event, d) => {
         if (d.depth === 0) {
           onNavigateUp();
-        } else if (d.data.isDirectory) {
+        } else if (d.data.isDirectory && !d.data.isSynthetic) {
           onDrillDown(d.data.path);
         }
       })
@@ -188,7 +195,7 @@ export const SunburstChart: React.FC<SunburstProps> = ({
   return (
     <div className="space-y-2">
       {/* 1. Header Toolbar */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2 bg-[#131518] border border-border rounded-lg text-xs">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2 bg-panel border border-border rounded-lg text-xs">
         <div className="flex items-center gap-1.5 font-mono text-[11px] text-secondary overflow-x-auto">
           <FolderTree className="w-3.5 h-3.5 text-accent shrink-0" />
           <span>Active Root:</span>
@@ -228,7 +235,7 @@ export const SunburstChart: React.FC<SunburstProps> = ({
         {/* Hover Tooltip Overlay */}
         {tooltip && tooltip.visible && (
           <div
-            className="absolute pointer-events-none z-50 bg-[#16181D] border border-border shadow-xl rounded px-3 py-2 text-xs space-y-1 font-sans transition-all"
+            className="absolute pointer-events-none z-50 bg-panel border border-border shadow-xl rounded px-3 py-2 text-xs space-y-1 font-sans transition-all"
             style={{
               left: Math.min(tooltip.x, (containerRef.current?.clientWidth || 600) - 220),
               top: Math.min(tooltip.y, (containerRef.current?.clientHeight || 400) - 100),

@@ -12,6 +12,8 @@ pub struct HierarchicalNode {
     pub category: Option<String>,
     pub is_directory: bool,
     pub file_count: Option<i64>,
+    pub session_id: Option<String>,
+    pub is_synthetic: Option<bool>,
     pub children: Option<Vec<HierarchicalNode>>,
 }
 

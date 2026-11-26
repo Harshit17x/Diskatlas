@@ -102,7 +102,7 @@ impl RuleMatcher {
         }
 
         // 9. Installed Applications (Priority 9)
-        if let Some((subcat, app)) = Self::match_applications(&p_lower, ext) {
+        if let Some((subcat, app)) = Self::match_applications(path, &p_lower, ext) {
             return ClassificationResult {
                 category: StorageCategory::Applications.id().to_string(),
                 subcategory: Some(subcat),
@@ -182,7 +182,7 @@ impl RuleMatcher {
 
     fn is_os_path(p: &str, is_system: bool) -> bool {
         p.contains("/windows/")
-            || p.contains("/c:/windows")
+            || p.contains(":/windows")
             || p.contains("/$recycle.bin/")
             || p.contains("/system volume information/")
             || p.starts_with("/system/")
@@ -331,10 +331,14 @@ impl RuleMatcher {
         None
     }
 
-    fn match_applications(p: &str, ext: &str) -> Option<(String, String)> {
-        if p.contains("/applications/") || p.contains("/program files/") || p.contains("/program files (x86)/") || p.contains("/appdata/local/programs/") {
-            // Extract application name from path segment
-            let app_name = Self::extract_app_name_from_path(p);
+    fn match_applications(orig_path: &str, p: &str, ext: &str) -> Option<(String, String)> {
+        if p.contains("/applications/")
+            || p.contains("/program files/")
+            || p.contains("/program files (x86)/")
+            || p.contains("/appdata/local/programs/")
+        {
+            // Extract application name from original-case path segment
+            let app_name = Self::extract_app_name_from_path(orig_path);
             return Some(("Application Executables & Bundles".into(), app_name));
         }
         if matches!(ext, "exe" | "dll" | "app" | "dylib" | "so" | "msi" | "pkg") {
@@ -343,15 +347,19 @@ impl RuleMatcher {
         None
     }
 
-    fn extract_app_name_from_path(p: &str) -> String {
-        let parts: Vec<&str> = p.split('/').collect();
+    fn extract_app_name_from_path(orig_path: &str) -> String {
+        let parts: Vec<&str> = orig_path.split(&['/', '\\'][..]).collect();
         for (i, part) in parts.iter().enumerate() {
-            if (*part == "applications" || *part == "program files" || *part == "program files (x86)" || *part == "programs")
+            let lower = part.to_lowercase();
+            if (lower == "applications"
+                || lower == "program files"
+                || lower == "program files (x86)"
+                || lower == "programs")
                 && i + 1 < parts.len()
             {
                 let next = parts[i + 1];
                 if !next.is_empty() {
-                    return next.replace(".app", "");
+                    return next.strip_suffix(".app").unwrap_or(next).to_string();
                 }
             }
         }

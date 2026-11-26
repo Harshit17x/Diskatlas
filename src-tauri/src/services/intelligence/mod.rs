@@ -6,16 +6,60 @@ use uuid::Uuid;
 
 use crate::error::Result;
 use crate::models::intelligence::*;
+use crate::storage::DbPool;
 
 pub struct IntelligenceService;
 
 impl IntelligenceService {
+    /// Returns cached recommendations profile if available, or computes & persists it when missing/forced.
+    pub fn get_or_generate_profile(
+        db_pool: &DbPool,
+        session_id: Option<&str>,
+        force_refresh: bool,
+    ) -> Result<StorageIntelligenceProfile> {
+        if !force_refresh {
+            let cached = db_pool.with_read_conn(|conn| {
+                let sid = crate::storage::resolve_session_id(conn, session_id)?;
+                let has_marker: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM app_settings WHERE key = ?1)",
+                        [format!("intel_generated:{}", sid)],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+                if !has_marker {
+                    return Ok(None);
+                }
+                let (drive_id, total_scanned_bytes): (String, i64) = conn.query_row(
+                    "SELECT drive_id, COALESCE(total_bytes, 0) FROM scan_sessions WHERE id = ?1",
+                    [&sid],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let recs = Self::load_persisted_recommendations(conn, &sid)?;
+                Ok(Some(Self::build_profile_from_recommendations(
+                    conn,
+                    sid,
+                    drive_id,
+                    total_scanned_bytes,
+                    recs,
+                )?))
+            })?;
+
+            if let Some(profile) = cached {
+                return Ok(profile);
+            }
+        }
+
+        let conn = db_pool.lock_conn();
+        Self::generate_intelligence_profile(&conn, session_id)
+    }
+
     /// Generates full Storage Intelligence profile: findings, consumers, and evidence-backed recommendations
     pub fn generate_intelligence_profile(
         conn: &Connection,
         session_id: Option<&str>,
     ) -> Result<StorageIntelligenceProfile> {
-        let sid = Self::resolve_session_id(conn, session_id)?;
+        let sid = crate::storage::resolve_session_id(conn, session_id)?;
 
         // Fetch session metrics and drive ID
         let (drive_id, total_scanned_bytes): (String, i64) = conn.query_row(
@@ -93,7 +137,7 @@ impl IntelligenceService {
                     recoverable_bytes: size_bytes,
                     expected_consequences: "Removing installer packages does not uninstall or harm currently installed software.".to_string(),
                     recommended_action: "Verify the corresponding software is installed or no longer needed, then remove the setup file.".to_string(),
-                    created_at: chrono_now_iso(),
+                    created_at: crate::storage::utc_iso_now(),
                 });
             }
         }
@@ -106,7 +150,11 @@ impl IntelligenceService {
             let mut stmt = conn.prepare(
                 "SELECT fh.path, f.name, f.size_bytes, f.category, fh.sha256
                  FROM file_hashes fh
-                 JOIN files f ON f.path = fh.path AND f.session_id = ?1
+                 JOIN files f
+                   ON f.path = fh.path
+                  AND f.size_bytes = fh.size_bytes
+                  AND COALESCE(f.modified_at, 0) = fh.modified_at
+                  AND f.session_id = ?1
                  WHERE fh.sha256 IN (
                      SELECT sha256 FROM file_hashes GROUP BY sha256 HAVING COUNT(*) > 1
                  )
@@ -151,7 +199,7 @@ impl IntelligenceService {
                             recoverable_bytes: size_bytes,
                             expected_consequences: "The primary file copy is retained; removing this redundant duplicate frees space with zero data loss.".to_string(),
                             recommended_action: "Remove redundant duplicate copy to reclaim space.".to_string(),
-                            created_at: chrono_now_iso(),
+                            created_at: crate::storage::utc_iso_now(),
                         });
                     }
                 }
@@ -208,7 +256,7 @@ impl IntelligenceService {
                         recoverable_bytes: size_bytes,
                         expected_consequences: "Build artifacts can be regenerated from repository source code at any time via your compiler or build tool.".to_string(),
                         recommended_action: "Run 'cargo clean', 'npm run build', or delete the compilation directory to reclaim space.".to_string(),
-                        created_at: chrono_now_iso(),
+                        created_at: crate::storage::utc_iso_now(),
                     });
                 } else if name == "node_modules" {
                     let group = if is_old {
@@ -235,7 +283,7 @@ impl IntelligenceService {
                         recoverable_bytes: size_bytes,
                         expected_consequences: "Project requires executing 'npm install' or 'pnpm install' before next run.".to_string(),
                         recommended_action: "If the project is currently in cold storage, delete dependencies; otherwise preserve.".to_string(),
-                        created_at: chrono_now_iso(),
+                        created_at: crate::storage::utc_iso_now(),
                     });
                 }
             }
@@ -288,7 +336,7 @@ impl IntelligenceService {
                     recoverable_bytes: 0, // 0 recoverable because user tools must NOT touch system files
                     expected_consequences: "Direct modification or deletion causes immediate operating system instability, BSOD, or boot corruption.".to_string(),
                     recommended_action: "Protected by system kernel. Non-destructive inspection only. Never modify or delete.".to_string(),
-                    created_at: chrono_now_iso(),
+                    created_at: crate::storage::utc_iso_now(),
                 });
             }
         }
@@ -332,15 +380,15 @@ impl IntelligenceService {
                     group: RecommendationGroup::MoveOrArchive,
                     risk_level: RiskLevel::Low,
                     reason: format!(
-                        "Very large high-definition video archive ({}) occupying primary SSD space {}.",
+                        "Very large high-definition video archive ({}) occupying primary SSD space{}.",
                         name,
-                        if is_old { "without recent modifications" } else { "" }
+                        if is_old { " without recent modifications" } else { "" }
                     ),
                     confidence: 0.85,
                     recoverable_bytes: size_bytes,
                     expected_consequences: "Media content is preserved but offloaded from high-speed local drive.".to_string(),
                     recommended_action: "Migrate cold video archive to external storage, NAS, or archival storage.".to_string(),
-                    created_at: chrono_now_iso(),
+                    created_at: crate::storage::utc_iso_now(),
                 });
             }
         }
@@ -386,7 +434,7 @@ impl IntelligenceService {
                     recoverable_bytes: size_bytes,
                     expected_consequences: "Raw deletion of application directories leaves dangling registry entries and broken system integrations.".to_string(),
                     recommended_action: "Uninstall using official operating system uninstaller (Settings > Apps or vendor uninstaller).".to_string(),
-                    created_at: chrono_now_iso(),
+                    created_at: crate::storage::utc_iso_now(),
                 });
             }
         }
@@ -421,6 +469,69 @@ impl IntelligenceService {
                 ])?;
             }
         }
+
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
+            params![format!("intel_generated:{}", sid), "1"],
+        );
+
+        Self::build_profile_from_recommendations(
+            conn,
+            sid,
+            drive_id,
+            total_scanned_bytes,
+            recommendations,
+        )
+    }
+
+    fn load_persisted_recommendations(
+        conn: &Connection,
+        session_id: &str,
+    ) -> Result<Vec<StorageRecommendation>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, path, name, size_bytes, category, rec_group,
+                    risk_level, reason, confidence, recoverable_bytes, expected_consequences,
+                    recommended_action, created_at
+             FROM storage_recommendations
+             WHERE session_id = ?1
+             ORDER BY recoverable_bytes DESC, size_bytes DESC",
+        )?;
+
+        let rows = stmt.query_map([session_id], |row| {
+            let group_str: String = row.get(6)?;
+            let risk_str: String = row.get(7)?;
+            Ok(StorageRecommendation {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                path: row.get(2)?,
+                name: row.get(3)?,
+                size_bytes: row.get(4)?,
+                category: row.get(5)?,
+                group: RecommendationGroup::from_str(&group_str),
+                risk_level: RiskLevel::from_str(&risk_str),
+                reason: row.get(8)?,
+                confidence: row.get(9)?,
+                recoverable_bytes: row.get(10)?,
+                expected_consequences: row.get(11)?,
+                recommended_action: row.get(12)?,
+                created_at: row.get(13)?,
+            })
+        })?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    fn build_profile_from_recommendations(
+        conn: &Connection,
+        sid: String,
+        drive_id: String,
+        total_scanned_bytes: i64,
+        recommendations: Vec<StorageRecommendation>,
+    ) -> Result<StorageIntelligenceProfile> {
 
         // -------------------------------------------------------------
         // Calculate Totals and Group Summaries
@@ -560,7 +671,7 @@ impl IntelligenceService {
                     "Developer tool or compilation output package.".to_string()
                 } else if cat == "videos" {
                     "High-definition video recording or raw media.".to_string()
-                } else if cat == "downloads" {
+                } else if cat == "downloads" || cat == "archives" {
                     "Downloaded distribution image or setup installer.".to_string()
                 } else if cat == "vm_emulators" {
                     "Virtual machine hard disk image or container snapshot.".to_string()
@@ -599,7 +710,7 @@ impl IntelligenceService {
         conn: &Connection,
         query: RecommendationsQuery,
     ) -> Result<RecommendationsResponse> {
-        let sid = Self::resolve_session_id(conn, query.session_id.as_deref())?;
+        let sid = crate::storage::resolve_session_id(conn, query.session_id.as_deref())?;
 
         let page = query.page.max(1);
         let page_size = query.page_size.clamp(1, 100);
@@ -628,8 +739,12 @@ impl IntelligenceService {
         if let Some(search) = &query.search {
             let term = search.trim();
             if !term.is_empty() {
-                conditions.push(format!("(name LIKE ?{0} OR path LIKE ?{0} OR reason LIKE ?{0})", param_index));
-                params_vec.push(rusqlite::types::Value::Text(format!("%{}%", term)));
+                let escaped = crate::storage::escape_like_pattern(term);
+                conditions.push(format!(
+                    "(name LIKE ?{0} ESCAPE '\\' OR path LIKE ?{0} ESCAPE '\\' OR reason LIKE ?{0} ESCAPE '\\')",
+                    param_index
+                ));
+                params_vec.push(rusqlite::types::Value::Text(format!("%{}%", escaped)));
             }
         }
 
@@ -700,36 +815,6 @@ impl IntelligenceService {
             total_pages,
         })
     }
-
-    /// Resolves target session id, falling back to latest session
-    fn resolve_session_id(conn: &Connection, requested: Option<&str>) -> Result<String> {
-        if let Some(id) = requested {
-            return Ok(id.to_string());
-        }
-
-        let latest: Option<String> = conn
-            .query_row(
-                "SELECT id FROM scan_sessions ORDER BY started_at DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .ok();
-
-        match latest {
-            Some(id) => Ok(id),
-            None => Err(crate::error::AppError::NotFound(
-                "No completed scan sessions found for storage intelligence analysis".to_string(),
-            )),
-        }
-    }
-}
-
-fn chrono_now_iso() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("{}-01-01T00:00:00Z", 1970 + (now / 31536000))
 }
 
 fn format_bytes_internal(bytes: i64) -> String {
