@@ -21,6 +21,7 @@ import { Button } from '../../components/common/Button';
 import { Badge } from '../../components/common/Badge';
 import { useScanStore } from '../../stores/scanStore';
 import { useDriveStore } from '../../stores/driveStore';
+import { useUIStore } from '../../stores/uiStore';
 import { formatBytes, formatNumber } from '../../utils/formatters';
 
 const DEFAULT_COMMON_EXCLUSIONS = [
@@ -108,6 +109,8 @@ export const ScanModal: React.FC = () => {
     if (summary) {
       fetchScanFiles(summary.sessionId, 1, 50, undefined, 'size', true);
     }
+    useUIStore.getState().setRequestedExplorerView('table');
+    useUIStore.getState().setActiveTab('explorer');
     closeScanModal();
   };
 

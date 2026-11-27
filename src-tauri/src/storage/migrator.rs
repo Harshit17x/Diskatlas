@@ -92,6 +92,12 @@ impl Migrator {
 
         info!("Current database migration version: {}", current_version);
 
+        // Large pre-existing databases (>50k rows) can hold tens of millions of file/dir rows.
+        // Heavy historical backfill/reindexing runs asynchronously in `DbPool::run_startup_maintenance`
+        // after app startup so the desktop window always opens immediately.
+        let is_large_existing_db = Self::table_max_id(conn, "files") >= 50_000
+            || Self::table_max_id(conn, "directories") >= 50_000;
+
         for migration in MIGRATIONS {
             if migration.version > current_version {
                 info!(
@@ -100,12 +106,16 @@ impl Migrator {
                 );
 
                 let tx = conn.transaction()?;
-                tx.execute_batch(migration.sql).map_err(|e| {
-                    AppError::Migration(format!(
-                        "Failed executing migration {} ('{}'): {}",
-                        migration.version, migration.name, e
-                    ))
-                })?;
+                if is_large_existing_db && migration.version >= 9 {
+                    Self::apply_lightweight_large_db_migration(&tx, migration.version)?;
+                } else {
+                    tx.execute_batch(migration.sql).map_err(|e| {
+                        AppError::Migration(format!(
+                            "Failed executing migration {} ('{}'): {}",
+                            migration.version, migration.name, e
+                        ))
+                    })?;
+                }
 
                 tx.execute(
                     "INSERT INTO _migrations (version, name) VALUES (?1, ?2)",
@@ -127,6 +137,43 @@ impl Migrator {
             .unwrap_or(0);
 
         Ok(latest_version)
+    }
+
+    fn table_max_id(conn: &Connection, table: &str) -> i64 {
+        let sql = format!("SELECT COALESCE(MAX(id), 0) FROM {}", table);
+        conn.query_row(&sql, [], |row| row.get(0)).unwrap_or(0)
+    }
+
+    /// Defers heavy multi-million-row index builds / orphan purges / summary rebuilds to
+    /// background startup maintenance while keeping lightweight DDL & schema versioning instant.
+    fn apply_lightweight_large_db_migration(tx: &Connection, version: i64) -> Result<()> {
+        match version {
+            9 => {
+                tx.execute(
+                    "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('maintenance:summaries_pending', '1')",
+                    [],
+                )?;
+            }
+            10 => {
+                tx.execute_batch(
+                    "CREATE INDEX IF NOT EXISTS idx_category_summaries_unique
+                         ON category_summaries(session_id, category);
+                     CREATE INDEX IF NOT EXISTS idx_class_summaries_category
+                         ON classification_summaries(session_id, category);
+                     INSERT OR REPLACE INTO app_settings (key, value) VALUES ('maintenance:dirs_unique_pending', '1');
+                     INSERT OR REPLACE INTO app_settings (key, value) VALUES ('maintenance:orphans_pending', '1');
+                     INSERT OR REPLACE INTO app_settings (key, value) VALUES ('maintenance:summaries_pending', '1');",
+                )?;
+            }
+            11 => {
+                tx.execute(
+                    "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('maintenance:summaries_pending', '1')",
+                    [],
+                )?;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Retrieve the current migration version without running new migrations
@@ -190,6 +237,76 @@ mod tests {
         let v1 = Migrator::run(&mut conn).unwrap();
         let v2 = Migrator::run(&mut conn).unwrap();
         assert_eq!(v1, v2);
+    }
+
+    #[test]
+    fn test_large_db_defers_heavy_migrations_9_to_11() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for migration in &MIGRATIONS[..8] {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "INSERT INTO _migrations (version, name) VALUES (?1, ?2)",
+                (migration.version, migration.name),
+            )
+            .unwrap();
+        }
+
+        conn.execute(
+            "INSERT INTO drives (id, label, mount_point, filesystem, total_bytes, available_bytes)
+             VALUES ('drv-1', 'Main', '/tmp', 'APFS', 1000, 500)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scan_sessions (id, drive_id, root_path, status, total_files)
+             VALUES ('sess-large', 'drv-1', '/tmp', 'completed', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files (id, session_id, path, name, parent_path, size_bytes, category)
+             VALUES (50000, 'sess-large', '/tmp/a.rs', 'a.rs', '/tmp', 2048, 'developer')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO category_summaries (session_id, category, file_count, total_bytes)
+             VALUES ('sess-large', 'code', 1, 2048)",
+            [],
+        )
+        .unwrap();
+
+        let version = Migrator::run(&mut conn).unwrap();
+        assert_eq!(version, 11);
+
+        let flag = |k: &str| -> String {
+            conn.query_row("SELECT value FROM app_settings WHERE key = ?1", [k], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(flag("maintenance:dirs_unique_pending"), "1");
+        assert_eq!(flag("maintenance:orphans_pending"), "1");
+        assert_eq!(flag("maintenance:summaries_pending"), "1");
+
+        let unique_dir_idx_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_dirs_session_path_unique')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !unique_dir_idx_exists,
+            "idx_dirs_session_path_unique should be deferred on large DBs"
+        );
+
+        let cat_sum_idx_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_category_summaries_unique')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(cat_sum_idx_exists);
     }
 }
 

@@ -357,4 +357,110 @@ mod tests {
 
         let _ = fs::remove_dir_all(&temp_base);
     }
+
+    #[test]
+    fn test_scan_starts_traversal_without_waiting_on_db_write_lock() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+        use crate::services::scanner::engine::STATUS_CANCELLED;
+
+        let test_run_id = Uuid::new_v4().to_string();
+        let temp_base = std::env::temp_dir().join(format!("diskatlas_nonblock_{}", test_run_id));
+        let root = temp_base.join("tree");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        File::create(root.join("alpha.txt")).unwrap().write_all(b"12345").unwrap();
+        File::create(root.join("sub/beta.log")).unwrap().write_all(b"67890").unwrap();
+
+        let db_path = temp_base.join("nonblock.db");
+        let db_pool = DbPool::new(&db_path).unwrap();
+        {
+            let mut conn = db_pool.lock_conn();
+            Migrator::run(&mut conn).unwrap();
+        }
+
+        // Simulate a long-running background DB write holding `lock_conn()` across scan launch.
+        let held_write_lock = db_pool.lock_conn();
+
+        let session_id = format!("nonblock-{}", test_run_id);
+        let options = ScanOptions {
+            session_id: session_id.clone(),
+            drive_id: "TEST_DRIVE".to_string(),
+            root_path: root.clone(),
+            exclusions: vec![],
+            batch_size: 2500,
+        };
+        let status = Arc::new(AtomicU8::new(STATUS_RUNNING));
+        let pause_signal = Arc::new((Mutex::new(()), std::sync::Condvar::new()));
+        let progress = Arc::new(Mutex::new(ScanProgress {
+            session_id: session_id.clone(),
+            drive_id: "TEST_DRIVE".to_string(),
+            root_path: root.to_string_lossy().to_string(),
+            status: ScanStatus::Running,
+            files_scanned: 0,
+            dirs_scanned: 0,
+            bytes_scanned: 0,
+            error_count: 0,
+            current_path: root.to_string_lossy().to_string(),
+            current_file: None,
+            recent_files: Vec::new(),
+            elapsed_millis: 0,
+        }));
+
+        let status_clone = Arc::clone(&status);
+        let pause_clone = Arc::clone(&pause_signal);
+        let progress_clone = Arc::clone(&progress);
+        let pool_clone = db_pool.clone();
+        let join = std::thread::spawn(move || {
+            ScanEngine::run_scan(
+                options,
+                status_clone,
+                pause_clone,
+                progress_clone,
+                pool_clone,
+                None,
+            )
+        });
+
+        // While the DB write lock is STILL held, filesystem traversal must discover files immediately.
+        let mut observed_files = 0;
+        let mut observed_recent = Vec::new();
+        for _ in 0..50 {
+            {
+                let p = progress.lock().unwrap();
+                observed_files = p.files_scanned;
+                observed_recent = p.recent_files.clone();
+                if observed_files >= 2 {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            observed_files >= 2,
+            "Traversal stalled waiting on DB write lock (files_scanned = {})",
+            observed_files
+        );
+        assert!(
+            observed_recent.iter().any(|p| p.ends_with("alpha.txt") || p.ends_with("beta.log")),
+            "recent_files should contain real files, got {:?}",
+            observed_recent
+        );
+
+        // Request cancellation while lock is held, then release the lock so final flush completes cleanly.
+        status.store(STATUS_CANCELLED, Ordering::SeqCst);
+        drop(held_write_lock);
+
+        let summary = join.join().unwrap().unwrap();
+        assert_eq!(summary.status, ScanStatus::Cancelled);
+        assert!(summary.total_files >= 2);
+
+        let manager = ScanManager::new();
+        let page = manager
+            .get_files(Some(&session_id), 1, 10, None, Some("size".into()), Some(true), &db_pool)
+            .unwrap();
+        assert_eq!(page.total_count, summary.total_files);
+
+        let _ = fs::remove_dir_all(&temp_base);
+    }
 }

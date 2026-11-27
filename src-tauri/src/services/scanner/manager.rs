@@ -312,11 +312,28 @@ impl ScanManager {
                     |row| row.get(0),
                 )?
             } else {
-                conn.query_row(
-                    "SELECT count(*) FROM files WHERE session_id = ?1",
-                    [&sid],
-                    |row| row.get(0),
-                )?
+                // O(1) lookup from finalized scan_sessions.total_files avoids 30s+ full index walks on 4M+ rows.
+                let (session_status, cached_total): (String, i64) = conn
+                    .query_row(
+                        "SELECT status, COALESCE(total_files, 0) FROM scan_sessions WHERE id = ?1",
+                        [&sid],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap_or_else(|_| (String::new(), 0));
+                if cached_total > 0
+                    && matches!(
+                        session_status.as_str(),
+                        "completed" | "completedWithErrors" | "completed_with_errors" | "cancelled"
+                    )
+                {
+                    cached_total
+                } else {
+                    conn.query_row(
+                        "SELECT count(*) FROM files WHERE session_id = ?1",
+                        [&sid],
+                        |row| row.get(0),
+                    )?
+                }
             };
 
             let order_col = match sort_by.as_deref() {

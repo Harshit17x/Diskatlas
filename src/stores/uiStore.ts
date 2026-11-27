@@ -2,13 +2,16 @@ import { create } from 'zustand';
 import type { ActiveTab } from '../types/ui';
 
 export type ThemeMode = 'light' | 'dark';
+export type ExplorerViewMode = 'treemap' | 'sunburst' | 'analytics' | 'table';
 
 interface UIState {
   activeTab: ActiveTab;
+  requestedExplorerView: ExplorerViewMode | null;
   sidebarCollapsed: boolean;
   commandPaletteOpen: boolean;
   theme: ThemeMode;
   setActiveTab: (tab: ActiveTab) => void;
+  setRequestedExplorerView: (view: ExplorerViewMode | null) => void;
   toggleSidebar: () => void;
   setCommandPaletteOpen: (open: boolean) => void;
   setTheme: (theme: ThemeMode) => void;
@@ -29,10 +32,12 @@ const getInitialTheme = (): ThemeMode => {
 
 export const useUIStore = create<UIState>((set, get) => ({
   activeTab: 'dashboard',
+  requestedExplorerView: null,
   sidebarCollapsed: false,
   commandPaletteOpen: false,
   theme: getInitialTheme(),
   setActiveTab: (tab) => set({ activeTab: tab }),
+  setRequestedExplorerView: (view) => set({ requestedExplorerView: view }),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
   setTheme: (theme) => {

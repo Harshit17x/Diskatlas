@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useDriveStore } from '../../stores/driveStore';
 import { useScanStore } from '../../stores/scanStore';
 import { useVisualizationStore } from '../../stores/visualizationStore';
+import { useUIStore } from '../../stores/uiStore';
 import { Card } from '../../components/common/Card';
 import { Button } from '../../components/common/Button';
 import { Badge } from '../../components/common/Badge';
@@ -39,6 +40,8 @@ export const DriveExplorerView: React.FC = () => {
 
   const [currentPath, setCurrentPath] = useState(selectedDrive?.mountPoint || '/');
   const [viewMode, setViewMode] = useState<'treemap' | 'sunburst' | 'analytics' | 'table'>('treemap');
+  const [fileScope, setFileScope] = useState<'auto' | 'all' | 'folder'>('auto');
+  const { requestedExplorerView, setRequestedExplorerView } = useUIStore();
 
   const {
     openScanModal,
@@ -57,6 +60,7 @@ export const DriveExplorerView: React.FC = () => {
     tree,
     isLoadingTree,
     currentSessionId,
+    sessionRootPath,
     currentRootPath,
     breadcrumbs,
     maxDepth,
@@ -69,6 +73,16 @@ export const DriveExplorerView: React.FC = () => {
   } = useVisualizationStore();
 
   useEffect(() => {
+    if (requestedExplorerView) {
+      setViewMode(requestedExplorerView);
+      if (requestedExplorerView === 'table') {
+        setFileScope('all');
+      }
+      setRequestedExplorerView(null);
+    }
+  }, [requestedExplorerView, setRequestedExplorerView]);
+
+  useEffect(() => {
     fetchTree(activeSessionId || undefined, undefined);
   }, [fetchTree, activeSessionId]);
 
@@ -78,13 +92,19 @@ export const DriveExplorerView: React.FC = () => {
     }
   }, [currentRootPath]);
 
+  const effectiveParentPath =
+    fileScope === 'all'
+      ? undefined
+      : fileScope === 'folder'
+      ? currentRootPath || undefined
+      : !currentRootPath || currentRootPath === sessionRootPath
+      ? undefined
+      : currentRootPath;
+
   useEffect(() => {
     const targetSid = currentSessionId || activeSessionId || undefined;
-    const targetParent = currentRootPath || undefined;
-    if (targetSid || targetParent) {
-      fetchScanFiles(targetSid, 1, pageSize, targetParent, sortBy, sortDesc);
-    }
-  }, [currentSessionId, currentRootPath, activeSessionId, pageSize, sortBy, sortDesc, fetchScanFiles]);
+    fetchScanFiles(targetSid, 1, pageSize, effectiveParentPath, sortBy, sortDesc);
+  }, [currentSessionId, effectiveParentPath, activeSessionId, pageSize, sortBy, sortDesc, fetchScanFiles]);
 
   const getFileCategoryIcon = (ext: string | null) => {
     if (!ext) return <File className="w-3.5 h-3.5 text-secondary flex-shrink-0" />;
@@ -126,7 +146,7 @@ export const DriveExplorerView: React.FC = () => {
       currentSessionId || activeSessionId || undefined,
       1,
       pageSize,
-      currentRootPath || undefined,
+      effectiveParentPath,
       newSortBy,
       nextDesc
     );
@@ -137,7 +157,7 @@ export const DriveExplorerView: React.FC = () => {
       currentSessionId || activeSessionId || undefined,
       newPage,
       pageSize,
-      currentRootPath || undefined,
+      effectiveParentPath,
       sortBy,
       sortDesc
     );
@@ -437,8 +457,8 @@ export const DriveExplorerView: React.FC = () => {
 
       {viewMode === 'table' && (
         <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-xs font-semibold text-primary uppercase tracking-wider">
                 Discovered File Registry
               </h2>
@@ -446,6 +466,33 @@ export const DriveExplorerView: React.FC = () => {
                 <Badge variant="neutral" size="sm">
                   {formatNumber(filePage.totalCount)} records
                 </Badge>
+              )}
+              {currentRootPath && (
+                <div className="flex items-center gap-1 ml-1 bg-elevated border border-border rounded p-0.5 text-[11px]">
+                  <button
+                    type="button"
+                    onClick={() => setFileScope('all')}
+                    className={`px-2 py-0.5 rounded transition-colors ${
+                      effectiveParentPath === undefined
+                        ? 'bg-accent text-white font-medium'
+                        : 'text-secondary hover:text-primary'
+                    }`}
+                  >
+                    All Session Files
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFileScope('folder')}
+                    className={`px-2 py-0.5 rounded transition-colors truncate max-w-[200px] ${
+                      effectiveParentPath !== undefined
+                        ? 'bg-accent text-white font-medium'
+                        : 'text-secondary hover:text-primary'
+                    }`}
+                    title={`Filter to direct files in ${currentRootPath}`}
+                  >
+                    Folder: {currentRootPath}
+                  </button>
+                </div>
               )}
             </div>
 
@@ -478,11 +525,32 @@ export const DriveExplorerView: React.FC = () => {
             )}
           </div>
 
-          <DataTable
-            columns={columns}
-            data={filePage?.items || []}
-            emptyMessage="No filesystem scan has been initiated yet. Click 'Scan Root Path' to trigger the Universal Filesystem Scanner."
-          />
+          {!hasFiles && !isLoadingFiles && effectiveParentPath ? (
+            <Card padding="lg" className="text-center py-8 space-y-3">
+              <FolderTree className="w-7 h-7 text-muted mx-auto" />
+              <div className="space-y-1">
+                <h3 className="text-sm font-semibold text-primary">
+                  No direct files in {effectiveParentPath}
+                </h3>
+                <p className="text-xs text-muted max-w-md mx-auto">
+                  This folder contains subdirectories rather than top-level files. Switch to all indexed session files or drill down into a child folder.
+                </p>
+              </div>
+              <Button size="sm" variant="primary" onClick={() => setFileScope('all')}>
+                Show All Indexed Files
+              </Button>
+            </Card>
+          ) : (
+            <DataTable
+              columns={columns}
+              data={filePage?.items || []}
+              emptyMessage={
+                isLoadingFiles
+                  ? 'Loading indexed files from SQLite...'
+                  : "No filesystem scan has been initiated yet. Click 'Scan Root Path' to trigger the Universal Filesystem Scanner."
+              }
+            />
+          )}
         </div>
       )}
     </div>

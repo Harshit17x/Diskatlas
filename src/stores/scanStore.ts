@@ -10,6 +10,7 @@ import { safeInvoke } from '../utils/tauri';
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 let elapsedTimer: ReturnType<typeof setInterval> | null = null;
 let scanStartTime = 0;
+const cancelledSessionIds = new Set<string>();
 
 const stopPolling = () => {
   if (pollInterval) {
@@ -280,6 +281,16 @@ export const useScanStore = create<ScanState>((set, get) => ({
                 isPaused: false,
                 error: 'Filesystem scan encountered an unexpected failure.',
               });
+            } else if (p.status === 'cancelled') {
+              cancelledSessionIds.add(p.sessionId);
+              set((s) => ({
+                isScanning: false,
+                isPaused: false,
+                activeSessionId:
+                  p.filesScanned === 0 && s.activeSessionId === p.sessionId
+                    ? null
+                    : s.activeSessionId,
+              }));
             }
           }
         }
@@ -326,14 +337,19 @@ export const useScanStore = create<ScanState>((set, get) => ({
   cancelScan: async () => {
     stopPolling();
     stopElapsedTimer();
-    const { activeSessionId } = get();
+    const { activeSessionId, progress } = get();
     if (!activeSessionId) return;
 
-    await safeInvoke('cancel_scan', { sessionId: activeSessionId });
+    cancelledSessionIds.add(activeSessionId);
+    const scannedCount = progress?.filesScanned ?? 0;
+
     set({
       isScanning: false,
       isPaused: false,
+      activeSessionId: scannedCount === 0 ? null : activeSessionId,
     });
+
+    await safeInvoke('cancel_scan', { sessionId: activeSessionId });
   },
 
   resetScan: () => {
@@ -391,11 +407,15 @@ export const useScanStore = create<ScanState>((set, get) => ({
   setupEventListeners: async () => {
     let unlistenProgress: UnlistenFn | undefined;
     let unlistenCompleted: UnlistenFn | undefined;
+    let unlistenCancelled: UnlistenFn | undefined;
     let unlistenError: UnlistenFn | undefined;
 
     try {
       unlistenProgress = await listen<ScanProgress>('scan://progress', (event) => {
         const payload = event.payload;
+        if (cancelledSessionIds.has(payload.sessionId) || payload.status === 'cancelled') {
+          return;
+        }
         set((state) => {
           // Ignore progress events belonging to a different session while tracking an active session
           if (
@@ -454,6 +474,30 @@ export const useScanStore = create<ScanState>((set, get) => ({
         });
       });
 
+      unlistenCancelled = await listen<ScanSummary>('scan://cancelled', (event) => {
+        const summary = event.payload;
+        cancelledSessionIds.add(summary.sessionId);
+        stopPolling();
+        stopElapsedTimer();
+        set((state) => ({
+          isScanning: false,
+          isPaused: false,
+          activeSessionId:
+            summary.totalFiles > 0
+              ? summary.sessionId
+              : state.activeSessionId === summary.sessionId
+              ? null
+              : state.activeSessionId,
+        }));
+
+        if (summary.totalFiles > 0) {
+          get().fetchScanFiles(summary.sessionId, 1, 50, undefined, 'size', true);
+          import('./visualizationStore').then(({ useVisualizationStore }) => {
+            useVisualizationStore.getState().fetchAnalytics(summary.sessionId);
+          });
+        }
+      });
+
       unlistenError = await listen<string>('scan://error', (event) => {
         stopPolling();
         stopElapsedTimer();
@@ -472,6 +516,7 @@ export const useScanStore = create<ScanState>((set, get) => ({
       stopElapsedTimer();
       unlistenProgress?.();
       unlistenCompleted?.();
+      unlistenCancelled?.();
       unlistenError?.();
     };
   },

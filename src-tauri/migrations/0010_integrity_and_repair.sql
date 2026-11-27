@@ -19,30 +19,50 @@
 -- ---------------------------------------------------------------------------
 -- 1. Uniqueness for directories
 -- ---------------------------------------------------------------------------
--- Deduplicate first: keep the most recently aggregated row per (session_id, path).
+-- Deduplicate directories only for (session_id, path) keys that actually appear > 1 time.
 DELETE FROM directories
-WHERE id NOT IN (
-    SELECT MAX(id)
-    FROM directories
-    GROUP BY session_id, path
+WHERE id IN (
+    SELECT d.id
+    FROM directories d
+    JOIN (
+        SELECT session_id, path, MAX(id) AS keep_id
+        FROM directories
+        GROUP BY session_id, path
+        HAVING COUNT(*) > 1
+    ) dup ON d.session_id = dup.session_id AND d.path = dup.path AND d.id != dup.keep_id
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_dirs_session_path_unique
     ON directories(session_id, path);
 
 -- ---------------------------------------------------------------------------
--- 2. Purge rows whose parent session no longer exists
+-- 2. Purge rows whose parent session no longer exists (index skip-scan on files/dirs)
 -- ---------------------------------------------------------------------------
--- NOTE: these run against a `files` table that can hold millions of rows, so the
--- anti-join is expressed as a LEFT JOIN against the (small) scan_sessions table
--- rather than a correlated NOT IN subquery, which SQLite cannot always optimize.
 DELETE FROM files
-WHERE session_id IS NOT NULL
-  AND session_id NOT IN (SELECT id FROM scan_sessions);
+WHERE session_id IN (
+    WITH RECURSIVE sids(sid) AS (
+        SELECT MIN(session_id) FROM files
+        UNION ALL
+        SELECT (SELECT MIN(session_id) FROM files WHERE session_id > sids.sid)
+        FROM sids WHERE sids.sid IS NOT NULL
+    )
+    SELECT sid FROM sids
+    WHERE sid IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM scan_sessions WHERE id = sid)
+);
 
 DELETE FROM directories
-WHERE session_id IS NOT NULL
-  AND session_id NOT IN (SELECT id FROM scan_sessions);
+WHERE session_id IN (
+    WITH RECURSIVE sids(sid) AS (
+        SELECT MIN(session_id) FROM directories
+        UNION ALL
+        SELECT (SELECT MIN(session_id) FROM directories WHERE session_id > sids.sid)
+        FROM sids WHERE sids.sid IS NOT NULL
+    )
+    SELECT sid FROM sids
+    WHERE sid IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM scan_sessions WHERE id = sid)
+);
 
 DELETE FROM scan_errors
 WHERE session_id IS NOT NULL

@@ -84,6 +84,14 @@ pub fn run() {
             // Automatically recover any orphaned/interrupted scans from previous unclean shutdowns
             let _ = scan_manager.recover_interrupted_scans(&db_pool);
 
+            // Run any heavy historical migrations/repairs asynchronously after opening window
+            let maint_pool = db_pool.clone();
+            std::thread::spawn(move || {
+                if let Err(err) = maint_pool.run_startup_maintenance() {
+                    tracing::warn!("Background database maintenance error: {}", err);
+                }
+            });
+
             app.manage(db_pool);
             app.manage(scan_manager);
 

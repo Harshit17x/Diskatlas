@@ -25,6 +25,7 @@ impl ScanEngine {
     #[allow(clippy::too_many_arguments)]
     fn emit_progress_if_needed(
         options: &ScanOptions,
+        status_flag: &AtomicU8,
         files_scanned: u64,
         dirs_scanned: u64,
         bytes_scanned: u64,
@@ -38,18 +39,29 @@ impl ScanEngine {
         last_emit: &mut Instant,
         force: bool,
     ) {
+        let status_code = status_flag.load(Ordering::SeqCst);
+        if status_code == STATUS_CANCELLED {
+            return;
+        }
+        let live_status = match status_code {
+            STATUS_PAUSED => ScanStatus::Paused,
+            STATUS_FAILED => ScanStatus::Failed,
+            _ => ScanStatus::Running,
+        };
+
         // Always keep the shared in-memory progress struct updated so get_scan_progress queries see live numbers
         let elapsed_millis = start_time.elapsed().as_millis() as u64;
         let path_str = current_path.to_string_lossy().to_string();
         let file_opt = current_file.map(|s| s.to_string());
 
         if let Ok(mut p) = progress.lock() {
+            p.status = live_status;
             p.files_scanned = files_scanned;
             p.dirs_scanned = dirs_scanned;
             p.bytes_scanned = bytes_scanned;
             p.error_count = error_count;
             p.current_path = path_str.clone();
-            p.current_file = file_opt.clone().or_else(|| Some(path_str.clone()));
+            p.current_file = file_opt.clone();
             if !recent_files.is_empty() {
                 p.recent_files = recent_files.to_vec();
             }
@@ -63,13 +75,13 @@ impl ScanEngine {
                     session_id: options.session_id.clone(),
                     drive_id: options.drive_id.clone(),
                     root_path: options.root_path.to_string_lossy().to_string(),
-                    status: ScanStatus::Running,
+                    status: live_status,
                     files_scanned,
                     dirs_scanned,
                     bytes_scanned,
                     error_count,
-                    current_path: path_str.clone(),
-                    current_file: file_opt.or_else(|| Some(path_str)),
+                    current_path: path_str,
+                    current_file: file_opt,
                     recent_files: recent_files.to_vec(),
                     elapsed_millis,
                 };
@@ -78,6 +90,117 @@ impl ScanEngine {
 
             *last_emit = Instant::now();
         }
+    }
+
+    fn ensure_session_registered(conn: &rusqlite::Connection, options: &ScanOptions) -> Result<()> {
+        let root_str = options.root_path.to_string_lossy().to_string();
+        let _ = conn.execute(
+            "INSERT INTO drives (id, label, mount_point, filesystem, total_bytes, available_bytes, is_removable, is_system)
+             VALUES (?1, ?2, ?3, 'UNKNOWN', 0, 0, 0, 1)
+             ON CONFLICT(id) DO NOTHING;",
+            (&options.drive_id, &options.drive_id, &root_str),
+        );
+        conn.execute(
+            "INSERT INTO scan_sessions (id, drive_id, root_path, status, started_at)
+             VALUES (?1, ?2, ?3, 'running', CURRENT_TIMESTAMP)
+             ON CONFLICT(id) DO UPDATE SET status = 'running';",
+            (&options.session_id, &options.drive_id, &root_str),
+        )?;
+        Ok(())
+    }
+
+    fn mark_session_registered(
+        db_pool: &DbPool,
+        options: &ScanOptions,
+        session_registered: &mut bool,
+    ) -> Result<()> {
+        if !*session_registered {
+            let conn = db_pool.lock_conn();
+            Self::ensure_session_registered(&conn, options)?;
+            *session_registered = true;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finalize_cancelled_scan(
+        db_pool: &DbPool,
+        options: &ScanOptions,
+        session_registered: &mut bool,
+        dir_map: &mut HashMap<String, RawDirItem>,
+        file_batch: &mut Vec<RawFileItem>,
+        error_batch: &mut Vec<RawErrorItem>,
+        files_scanned: u64,
+        dirs_scanned: u64,
+        bytes_scanned: u64,
+        error_count: u64,
+        start_time: Instant,
+        progress: &Arc<Mutex<ScanProgress>>,
+        app_handle: &Option<AppHandle>,
+    ) -> Result<ScanSummary> {
+        info!("Scan session '{}' cancelled by user", options.session_id);
+        Self::mark_session_registered(db_pool, options, session_registered)?;
+
+        if !file_batch.is_empty() || !error_batch.is_empty() {
+            let mut empty_dirs = Vec::new();
+            Self::flush_batches(db_pool, &options.session_id, file_batch, &mut empty_dirs, error_batch)?;
+        }
+        if !dir_map.is_empty() {
+            Self::rollup_and_flush_directories(
+                db_pool,
+                &options.session_id,
+                dir_map,
+                options.batch_size,
+                &options.root_path,
+            )?;
+            Self::ensure_root_directory_row(
+                db_pool,
+                &options.session_id,
+                &options.root_path,
+                files_scanned,
+                dirs_scanned,
+                bytes_scanned,
+            )?;
+        }
+
+        Self::update_session_status(
+            db_pool,
+            &options.session_id,
+            ScanStatus::Cancelled,
+            files_scanned,
+            dirs_scanned,
+            bytes_scanned,
+            error_count,
+        )?;
+
+        let duration_millis = start_time.elapsed().as_millis() as u64;
+        if let Ok(mut p) = progress.lock() {
+            p.status = ScanStatus::Cancelled;
+            p.files_scanned = files_scanned;
+            p.dirs_scanned = dirs_scanned;
+            p.bytes_scanned = bytes_scanned;
+            p.error_count = error_count;
+            p.current_file = None;
+            p.elapsed_millis = duration_millis;
+        }
+
+        let summary = ScanSummary {
+            session_id: options.session_id.clone(),
+            drive_id: options.drive_id.clone(),
+            root_path: options.root_path.to_string_lossy().to_string(),
+            status: ScanStatus::Cancelled,
+            total_files: files_scanned,
+            total_dirs: dirs_scanned,
+            total_bytes: bytes_scanned,
+            error_count,
+            duration_millis,
+        };
+
+        if let Some(ref handle) = app_handle {
+            handle.emit("scan://cancelled", &summary).ok();
+        }
+
+        Ok(summary)
     }
 
     /// Executes the full recursive scan synchronously on a dedicated OS thread.
@@ -97,22 +220,14 @@ impl ScanEngine {
             options.root_path.display()
         );
 
-        // Ensure drive record exists in drives table to satisfy foreign key constraint
-        {
-            let conn = db_pool.lock_conn();
-            let root_str = options.root_path.to_string_lossy().to_string();
-            let _ = conn.execute(
-                "INSERT INTO drives (id, label, mount_point, filesystem, total_bytes, available_bytes, is_removable, is_system)
-                 VALUES (?1, ?2, ?3, 'UNKNOWN', 0, 0, 0, 1)
-                 ON CONFLICT(id) DO NOTHING;",
-                (&options.drive_id, &options.drive_id, &root_str),
-            );
-            conn.execute(
-                "INSERT INTO scan_sessions (id, drive_id, root_path, status, started_at)
-                 VALUES (?1, ?2, ?3, 'running', CURRENT_TIMESTAMP)
-                 ON CONFLICT(id) DO UPDATE SET status = 'running';",
-                (&options.session_id, &options.drive_id, &root_str),
-            )?;
+        // Attempt non-blocking DB registration so traversal starts immediately even if background
+        // maintenance or another write holds `lock_conn()`. Deferred cleanly until first DB flush if busy.
+        let mut session_registered = false;
+        if let Some(conn) = db_pool.try_lock_conn() {
+            Self::ensure_session_registered(&conn, &options)?;
+            session_registered = true;
+        } else {
+            debug!("SQLite write lock busy at scan start; starting filesystem traversal immediately");
         }
 
         // Cycle detection: track visited inodes or canonical paths
@@ -186,7 +301,6 @@ impl ScanEngine {
 
         // Batch buffers for SQLite writes
         let mut file_batch: Vec<RawFileItem> = Vec::with_capacity(options.batch_size);
-        let mut dir_batch: Vec<RawDirItem> = Vec::with_capacity(options.batch_size);
         let mut error_batch: Vec<RawErrorItem> = Vec::with_capacity(100);
 
         let mut files_scanned: u64 = 0;
@@ -196,45 +310,88 @@ impl ScanEngine {
         let root_display = options.root_path.to_string_lossy().to_string();
         #[allow(unused_assignments)]
         let mut current_file: Option<String> = None;
-        let mut recent_files: Vec<String> = vec![root_display.clone()];
+        let mut recent_files: Vec<String> = Vec::new();
         // Initialize last_emit 200ms in the past so the first visited directory immediately emits live feedback to UI
         let mut last_emit = Instant::now().checked_sub(Duration::from_millis(200)).unwrap_or_else(Instant::now);
         let mut loop_counter: usize = 0;
 
         // Immediately emit initial progress event so UI receives active scanning feedback
-        if let Some(ref handle) = app_handle {
-            let initial = ScanProgress {
-                session_id: options.session_id.clone(),
-                drive_id: options.drive_id.clone(),
-                root_path: options.root_path.to_string_lossy().to_string(),
-                status: ScanStatus::Running,
-                files_scanned: 0,
-                dirs_scanned: 0,
-                bytes_scanned: 0,
-                error_count: 0,
-                current_path: root_display.clone(),
-                current_file: Some(root_display),
-                recent_files: recent_files.clone(),
-                elapsed_millis: 0,
-            };
-            handle.emit("scan://progress", &initial).ok();
+        if status.load(Ordering::SeqCst) != STATUS_CANCELLED {
+            if let Some(ref handle) = app_handle {
+                let initial = ScanProgress {
+                    session_id: options.session_id.clone(),
+                    drive_id: options.drive_id.clone(),
+                    root_path: root_display.clone(),
+                    status: ScanStatus::Running,
+                    files_scanned: 0,
+                    dirs_scanned: 0,
+                    bytes_scanned: 0,
+                    error_count: 0,
+                    current_path: root_display,
+                    current_file: None,
+                    recent_files: Vec::new(),
+                    elapsed_millis: 0,
+                };
+                handle.emit("scan://progress", &initial).ok();
+            }
         }
 
         while let Some(current_dir) = dir_stack.pop() {
+            // Check cancellation & pause before popping progress or advancing traversal
+            if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
+                return Self::finalize_cancelled_scan(
+                    &db_pool,
+                    &options,
+                    &mut session_registered,
+                    &mut dir_map,
+                    &mut file_batch,
+                    &mut error_batch,
+                    files_scanned,
+                    dirs_scanned,
+                    bytes_scanned,
+                    error_count,
+                    start_time,
+                    &progress,
+                    &app_handle,
+                );
+            }
+
+            if status.load(Ordering::SeqCst) == STATUS_PAUSED {
+                let (lock, cvar) = &*pause_signal;
+                let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                while status.load(Ordering::SeqCst) == STATUS_PAUSED {
+                    debug!("Scan session '{}' paused, waiting...", options.session_id);
+                    guard = cvar
+                        .wait_timeout(guard, Duration::from_millis(200))
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0;
+                }
+            }
+
+            if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
+                return Self::finalize_cancelled_scan(
+                    &db_pool,
+                    &options,
+                    &mut session_registered,
+                    &mut dir_map,
+                    &mut file_batch,
+                    &mut error_batch,
+                    files_scanned,
+                    dirs_scanned,
+                    bytes_scanned,
+                    error_count,
+                    start_time,
+                    &progress,
+                    &app_handle,
+                );
+            }
+
             loop_counter += 1;
 
-            let cur_dir_str = current_dir.to_string_lossy().to_string();
-            current_file = Some(cur_dir_str.clone());
-            if recent_files.len() >= 10 {
-                recent_files.remove(0);
-            }
-            if !recent_files.contains(&cur_dir_str) {
-                recent_files.push(cur_dir_str);
-            }
-
-            // Emit live progress immediately when visiting a new directory (force emit for first 10 directories)
+            // Emit live progress when visiting a new directory (force emit for first 10 directories)
             Self::emit_progress_if_needed(
                 &options,
+                &status,
                 files_scanned,
                 dirs_scanned,
                 bytes_scanned,
@@ -254,65 +411,12 @@ impl ScanEngine {
                 std::thread::yield_now();
             }
 
-            // Check cancellation
-            if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
-                info!("Scan session '{}' cancelled by user", options.session_id);
-                // Perform bottom-up rollup on whatever was scanned so far before flushing
-                Self::rollup_and_flush_directories(&db_pool, &options.session_id, &mut dir_map, options.batch_size, &options.root_path)?;
-                Self::flush_batches(&db_pool, &options.session_id, &mut file_batch, &mut dir_batch, &mut error_batch)?;
-                Self::ensure_root_directory_row(&db_pool, &options.session_id, &options.root_path, files_scanned, dirs_scanned, bytes_scanned)?;
-                Self::update_session_status(&db_pool, &options.session_id, ScanStatus::Cancelled, files_scanned, dirs_scanned, bytes_scanned, error_count)?;
-                return Ok(ScanSummary {
-                    session_id: options.session_id,
-                    drive_id: options.drive_id,
-                    root_path: options.root_path.to_string_lossy().to_string(),
-                    status: ScanStatus::Cancelled,
-                    total_files: files_scanned,
-                    total_dirs: dirs_scanned,
-                    total_bytes: bytes_scanned,
-                    error_count,
-                    duration_millis: start_time.elapsed().as_millis() as u64,
-                });
-            }
-
-            // Check pause — wait cleanly on condvar until resumed or cancelled
-            if status.load(Ordering::SeqCst) == STATUS_PAUSED {
-                let (lock, cvar) = &*pause_signal;
-                let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                while status.load(Ordering::SeqCst) == STATUS_PAUSED {
-                    debug!("Scan session '{}' paused, waiting...", options.session_id);
-                    guard = cvar
-                        .wait_timeout(guard, Duration::from_millis(200))
-                        .unwrap_or_else(|e| e.into_inner())
-                        .0;
-                }
-            }
-
-            // Re-check cancellation immediately after waking from pause
-            if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
-                info!("Scan session '{}' cancelled by user", options.session_id);
-                Self::rollup_and_flush_directories(&db_pool, &options.session_id, &mut dir_map, options.batch_size, &options.root_path)?;
-                Self::flush_batches(&db_pool, &options.session_id, &mut file_batch, &mut dir_batch, &mut error_batch)?;
-                Self::ensure_root_directory_row(&db_pool, &options.session_id, &options.root_path, files_scanned, dirs_scanned, bytes_scanned)?;
-                Self::update_session_status(&db_pool, &options.session_id, ScanStatus::Cancelled, files_scanned, dirs_scanned, bytes_scanned, error_count)?;
-                return Ok(ScanSummary {
-                    session_id: options.session_id,
-                    drive_id: options.drive_id,
-                    root_path: options.root_path.to_string_lossy().to_string(),
-                    status: ScanStatus::Cancelled,
-                    total_files: files_scanned,
-                    total_dirs: dirs_scanned,
-                    total_bytes: bytes_scanned,
-                    error_count,
-                    duration_millis: start_time.elapsed().as_millis() as u64,
-                });
-            }
-
             // Check system internal boundary exclusions (e.g. /System/Volumes firmlinks, /Volumes external mounts, /dev)
             if Self::is_system_internal_exclusion(&current_dir, &options.root_path) {
                 debug!("Skipping system internal directory: {}", current_dir.display());
                 Self::emit_progress_if_needed(
                     &options,
+                    &status,
                     files_scanned,
                     dirs_scanned,
                     bytes_scanned,
@@ -335,6 +439,7 @@ impl ScanEngine {
                 debug!("Skipping excluded directory: {}", current_dir.display());
                 Self::emit_progress_if_needed(
                     &options,
+                    &status,
                     files_scanned,
                     dirs_scanned,
                     bytes_scanned,
@@ -361,6 +466,7 @@ impl ScanEngine {
                         debug!("Cycle detected on directory '{}', skipping loop", current_dir.display());
                         Self::emit_progress_if_needed(
                             &options,
+                            &status,
                             files_scanned,
                             dirs_scanned,
                             bytes_scanned,
@@ -385,6 +491,7 @@ impl ScanEngine {
                         debug!("Cycle detected on directory '{}', skipping loop", current_dir.display());
                         Self::emit_progress_if_needed(
                             &options,
+                            &status,
                             files_scanned,
                             dirs_scanned,
                             bytes_scanned,
@@ -426,6 +533,7 @@ impl ScanEngine {
                     debug!("Inaccessible protected path '{}': {}", current_dir.display(), err);
                     Self::emit_progress_if_needed(
                         &options,
+                        &status,
                         files_scanned,
                         dirs_scanned,
                         bytes_scanned,
@@ -568,6 +676,7 @@ impl ScanEngine {
 
                     // Flush batch if buffer is full
                     if file_batch.len() >= options.batch_size {
+                        Self::mark_session_registered(&db_pool, &options, &mut session_registered)?;
                         let mut empty_dirs = Vec::new();
                         Self::flush_batches(&db_pool, &options.session_id, &mut file_batch, &mut empty_dirs, &mut error_batch)?;
                         std::thread::yield_now();
@@ -577,6 +686,7 @@ impl ScanEngine {
                     if files_scanned == 1 || files_scanned % 30 == 0 || last_emit.elapsed() >= Duration::from_millis(80) {
                         Self::emit_progress_if_needed(
                             &options,
+                            &status,
                             files_scanned,
                             dirs_scanned,
                             bytes_scanned,
@@ -620,6 +730,7 @@ impl ScanEngine {
             // Update in-memory progress and emit throttled event
             Self::emit_progress_if_needed(
                 &options,
+                &status,
                 files_scanned,
                 dirs_scanned,
                 bytes_scanned,
@@ -634,6 +745,8 @@ impl ScanEngine {
                 false,
             );
         }
+
+        Self::mark_session_registered(&db_pool, &options, &mut session_registered)?;
 
         // Final flush of remaining file and error records
         let mut empty_dir_batch = Vec::new();
@@ -683,18 +796,21 @@ impl ScanEngine {
         // Automated post-scan intelligence pipeline (with cancel checks & error logging):
         // 1. Storage Classification Summaries
         if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
-            Self::update_session_status(&db_pool, &options.session_id, ScanStatus::Cancelled, files_scanned, dirs_scanned, bytes_scanned, error_count)?;
-            return Ok(ScanSummary {
-                session_id: options.session_id,
-                drive_id: options.drive_id,
-                root_path: options.root_path.to_string_lossy().to_string(),
-                status: ScanStatus::Cancelled,
-                total_files: files_scanned,
-                total_dirs: dirs_scanned,
-                total_bytes: bytes_scanned,
+            return Self::finalize_cancelled_scan(
+                &db_pool,
+                &options,
+                &mut session_registered,
+                &mut dir_map,
+                &mut file_batch,
+                &mut error_batch,
+                files_scanned,
+                dirs_scanned,
+                bytes_scanned,
                 error_count,
-                duration_millis: start_time.elapsed().as_millis() as u64,
-            });
+                start_time,
+                &progress,
+                &app_handle,
+            );
         }
 
         emit_stage("Finalizing storage classification summaries...");
@@ -705,18 +821,21 @@ impl ScanEngine {
 
         // 2. Developer Storage Project Attribution (DB-only; skips Docker CLI / host cache crawls)
         if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
-            Self::update_session_status(&db_pool, &options.session_id, ScanStatus::Cancelled, files_scanned, dirs_scanned, bytes_scanned, error_count)?;
-            return Ok(ScanSummary {
-                session_id: options.session_id,
-                drive_id: options.drive_id,
-                root_path: options.root_path.to_string_lossy().to_string(),
-                status: ScanStatus::Cancelled,
-                total_files: files_scanned,
-                total_dirs: dirs_scanned,
-                total_bytes: bytes_scanned,
+            return Self::finalize_cancelled_scan(
+                &db_pool,
+                &options,
+                &mut session_registered,
+                &mut dir_map,
+                &mut file_batch,
+                &mut error_batch,
+                files_scanned,
+                dirs_scanned,
+                bytes_scanned,
                 error_count,
-                duration_millis: start_time.elapsed().as_millis() as u64,
-            });
+                start_time,
+                &progress,
+                &app_handle,
+            );
         }
 
         emit_stage("Profiling developer project storage...");
@@ -727,18 +846,21 @@ impl ScanEngine {
 
         // 3. Storage Intelligence Recommendations
         if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
-            Self::update_session_status(&db_pool, &options.session_id, ScanStatus::Cancelled, files_scanned, dirs_scanned, bytes_scanned, error_count)?;
-            return Ok(ScanSummary {
-                session_id: options.session_id,
-                drive_id: options.drive_id,
-                root_path: options.root_path.to_string_lossy().to_string(),
-                status: ScanStatus::Cancelled,
-                total_files: files_scanned,
-                total_dirs: dirs_scanned,
-                total_bytes: bytes_scanned,
+            return Self::finalize_cancelled_scan(
+                &db_pool,
+                &options,
+                &mut session_registered,
+                &mut dir_map,
+                &mut file_batch,
+                &mut error_batch,
+                files_scanned,
+                dirs_scanned,
+                bytes_scanned,
                 error_count,
-                duration_millis: start_time.elapsed().as_millis() as u64,
-            });
+                start_time,
+                &progress,
+                &app_handle,
+            );
         }
 
         emit_stage("Generating storage intelligence recommendations...");
@@ -814,6 +936,9 @@ impl ScanEngine {
         }
 
         let mut conn = db_pool.lock_conn();
+        if !dir_batch.is_empty() {
+            DbPool::ensure_directories_unique_index(&conn)?;
+        }
         let tx = conn.transaction()?;
 
         // 1. Files
@@ -1152,6 +1277,7 @@ impl ScanEngine {
         }
 
         let conn = db_pool.lock_conn();
+        DbPool::ensure_directories_unique_index(&conn)?;
 
         let (created_at, modified_at) = match fs::metadata(root_path) {
             Ok(m) => Self::get_timestamps(&m),
