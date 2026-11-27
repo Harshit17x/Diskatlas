@@ -19,20 +19,31 @@ export const CleanupConfirmationModal: React.FC = () => {
   const {
     cleanupPlan,
     selectedIds,
+    pendingDirectCleanup,
+    clearPendingDirectCleanup,
     useRecycleBin,
     setUseRecycleBin,
     confirmationModalOpen,
     setConfirmationModalOpen,
     executeCleanup,
+    executePendingDirectCleanup,
     executingCleanup,
     error,
   } = useCleanupStore();
 
   const [inputPhrase, setInputPhrase] = useState('');
 
-  if (!cleanupPlan || !confirmationModalOpen) return null;
+  if (!confirmationModalOpen) return null;
 
-  const selectedCandidates = cleanupPlan.candidates.filter((c) => selectedIds.has(c.id));
+  const isDirectMode = pendingDirectCleanup !== null;
+  const selectedCandidates = isDirectMode
+    ? pendingDirectCleanup.items
+    : cleanupPlan
+    ? cleanupPlan.candidates.filter((c) => selectedIds.has(c.id))
+    : [];
+
+  if (selectedCandidates.length === 0) return null;
+
   const totalReclaimableBytes = selectedCandidates.reduce((acc, c) => acc + c.sizeBytes, 0);
   const cloudSyncedItems = selectedCandidates.filter((c) => c.isCloudSynced);
   const reviewRequiredItems = selectedCandidates.filter((c) => c.group === 'review_required');
@@ -42,12 +53,15 @@ export const CleanupConfirmationModal: React.FC = () => {
   const handleClose = () => {
     if (executingCleanup) return;
     setInputPhrase('');
+    clearPendingDirectCleanup();
     setConfirmationModalOpen(false);
   };
 
   const handleExecute = async () => {
     if (!isConfirmed || executingCleanup) return;
-    const success = await executeCleanup(inputPhrase.trim());
+    const success = isDirectMode
+      ? await executePendingDirectCleanup(inputPhrase.trim())
+      : await executeCleanup(inputPhrase.trim());
     if (success) {
       setInputPhrase('');
     }
@@ -57,8 +71,8 @@ export const CleanupConfirmationModal: React.FC = () => {
     <Modal
       isOpen={confirmationModalOpen}
       onClose={handleClose}
-      title="Confirm Storage Cleanup"
-      description="Review selected items and verify safety parameters before performing cleanup"
+      title={isDirectMode ? pendingDirectCleanup.title : 'Confirm Storage Cleanup'}
+      description="Review selected items and grant explicit permission before moving files to Trash or deleting"
       maxWidth="lg"
       footer={
         <div className="flex items-center justify-between w-full">

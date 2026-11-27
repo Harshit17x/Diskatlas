@@ -1,5 +1,7 @@
 pub mod analysis;
+pub mod applications;
 pub mod classifier;
+pub mod cleanup;
 pub mod developer;
 pub mod drive_detector;
 pub mod history;
@@ -7,4 +9,3 @@ pub mod intelligence;
 pub mod scanner;
 pub mod system_inspector;
 pub mod visualization;
-pub mod cleanup;

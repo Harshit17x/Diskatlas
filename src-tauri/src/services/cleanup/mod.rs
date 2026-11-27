@@ -1,3 +1,4 @@
+pub mod quick_sweep;
 pub mod safeguards;
 
 use rusqlite::{params, Connection};
@@ -8,7 +9,8 @@ use tracing::{info, warn};
 use crate::error::{AppError, Result};
 use crate::models::cleanup::{
     CleanupAuditQuery, CleanupAuditRecord, CleanupAuditResponse, CleanupItemCandidate,
-    CleanupOperationResult, CleanupPlan, ExecuteCleanupRequest, ExecuteCleanupResponse,
+    CleanupOperationResult, CleanupPlan, DirectCleanupItemInput, ExecuteCleanupRequest,
+    ExecuteCleanupResponse, ExecuteDirectCleanupRequest,
 };
 use crate::models::intelligence::{RecommendationGroup, RiskLevel};
 use crate::services::intelligence::IntelligenceService;
@@ -228,181 +230,29 @@ impl CleanupService {
                 }
             };
 
-            let path_obj = Path::new(&path);
+            let item = DirectCleanupItemInput {
+                id: item_id.clone(),
+                path,
+                name,
+                size_bytes,
+                category,
+                risk_level,
+            };
 
-            // 1. Re-validate security safeguards immediately before deletion
-            let (is_critical, critical_reason) = safeguards::is_system_critical_path(path_obj);
-            if is_critical {
-                let err_msg = format!(
-                    "Security block: {}",
-                    critical_reason.unwrap_or("Protected operating system or boot component")
-                );
-                warn!("Refusing to clean protected path: {} ({})", path, err_msg);
-
-                Self::log_audit_event(
-                    conn,
-                    &request.batch_id,
-                    audit_session_id.as_deref(),
-                    &path,
-                    &name,
-                    size_bytes,
-                    &category,
-                    &risk_level,
-                    "skipped",
-                    "blocked_security",
-                    false,
-                    Some(&err_msg),
-                )?;
-
-                results.push(CleanupOperationResult {
-                    id: item_id.clone(),
-                    path,
-                    name,
-                    size_bytes,
-                    status: "blocked_security".to_string(),
-                    cleanup_method: "skipped".to_string(),
-                    is_reversible: false,
-                    error_message: Some(err_msg),
-                });
+            let op_result = Self::process_single_cleanup_item(
+                conn,
+                &request.batch_id,
+                audit_session_id.as_deref(),
+                &item,
+                request.use_recycle_bin,
+            )?;
+            if op_result.status == "success" {
+                successful_count += 1;
+                bytes_reclaimed += op_result.size_bytes;
+            } else {
                 failed_count += 1;
-                continue;
             }
-
-            // 2. Validate current disk existence
-            if !path_obj.exists() {
-                let err_msg = "Path does not exist on disk (may have been moved or previously deleted)".to_string();
-                Self::log_audit_event(
-                    conn,
-                    &request.batch_id,
-                    audit_session_id.as_deref(),
-                    &path,
-                    &name,
-                    size_bytes,
-                    &category,
-                    &risk_level,
-                    "skipped",
-                    "not_found",
-                    false,
-                    Some(&err_msg),
-                )?;
-
-                results.push(CleanupOperationResult {
-                    id: item_id.clone(),
-                    path,
-                    name,
-                    size_bytes,
-                    status: "not_found".to_string(),
-                    cleanup_method: "skipped".to_string(),
-                    is_reversible: false,
-                    error_message: Some(err_msg),
-                });
-                failed_count += 1;
-                continue;
-            }
-
-            // 3. Perform deletion (preferring reversible Recycle Bin / Trash)
-            let op_res: std::result::Result<(&str, bool), (&str, bool, &str, String)> =
-                if request.use_recycle_bin {
-                    trash::delete(path_obj)
-                        .map(|_| ("recycle_bin", true))
-                        .map_err(|e| {
-                            let err_str = e.to_string();
-                            let lower = err_str.to_lowercase();
-                            let status = if lower.contains("permission") || lower.contains("access") {
-                                "permission_denied"
-                            } else if lower.contains("in use")
-                                || lower.contains("busy")
-                                || lower.contains("sharing")
-                            {
-                                "in_use"
-                            } else {
-                                "failed"
-                            };
-                            ("recycle_bin", true, status, err_str)
-                        })
-                } else {
-                    Self::permanently_delete_path(path_obj)
-                        .map(|_| ("permanent_delete", false))
-                        .map_err(|e| {
-                            let status = match e.kind() {
-                                std::io::ErrorKind::PermissionDenied => "permission_denied",
-                                std::io::ErrorKind::NotFound => "not_found",
-                                _ => "failed",
-                            };
-                            ("permanent_delete", false, status, e.to_string())
-                        })
-                };
-
-            match op_res {
-                Ok((method, is_reversible)) => {
-                    info!(method = method, path = %path, "Cleanup deletion succeeded");
-                    Self::log_audit_event(
-                        conn,
-                        &request.batch_id,
-                        audit_session_id.as_deref(),
-                        &path,
-                        &name,
-                        size_bytes,
-                        &category,
-                        &risk_level,
-                        method,
-                        "success",
-                        is_reversible,
-                        None,
-                    )?;
-
-                    results.push(CleanupOperationResult {
-                        id: item_id.clone(),
-                        path: path.clone(),
-                        name,
-                        size_bytes,
-                        status: "success".to_string(),
-                        cleanup_method: method.to_string(),
-                        is_reversible,
-                        error_message: None,
-                    });
-                    successful_count += 1;
-                    bytes_reclaimed += size_bytes;
-
-                    if let Err(e) = Self::record_deleted_path_in_db(
-                        conn,
-                        audit_session_id.as_deref(),
-                        item_id,
-                        &path,
-                    ) {
-                        warn!(path = %path, error = %e, "Failed to update DB rollups after cleanup");
-                    }
-                }
-                Err((method, is_reversible, status, err_str)) => {
-                    warn!(method = method, path = %path, error = %err_str, "Cleanup deletion failed");
-                    Self::log_audit_event(
-                        conn,
-                        &request.batch_id,
-                        audit_session_id.as_deref(),
-                        &path,
-                        &name,
-                        size_bytes,
-                        &category,
-                        &risk_level,
-                        method,
-                        status,
-                        is_reversible,
-                        Some(&err_str),
-                    )?;
-
-                    results.push(CleanupOperationResult {
-                        id: item_id.clone(),
-                        path,
-                        name,
-                        size_bytes,
-                        status: status.to_string(),
-                        cleanup_method: method.to_string(),
-                        is_reversible,
-                        error_message: Some(err_str),
-                    });
-                    failed_count += 1;
-                }
-            }
+            results.push(op_result);
         }
 
         Ok(ExecuteCleanupResponse {
@@ -413,6 +263,234 @@ impl CleanupService {
             bytes_reclaimed,
             results,
         })
+    }
+
+    /// Executes user-confirmed cleanup on explicit path candidates (from Quick Sweep or Apps Inspector)
+    /// while enforcing identical confirmation phrase, path safeguards, Trash default, and audit trail.
+    pub fn execute_direct_cleanup(
+        conn: &Connection,
+        request: ExecuteDirectCleanupRequest,
+    ) -> Result<ExecuteCleanupResponse> {
+        if request.confirmation_phrase.trim() != "CONFIRM_CLEANUP" {
+            return Err(AppError::ValidationFailed(
+                "Cleanup aborted: Explicit confirmation phrase 'CONFIRM_CLEANUP' must be entered. Unconfirmed or automated execution is strictly disallowed.".to_string(),
+            ));
+        }
+
+        if request.items.is_empty() {
+            return Err(AppError::ValidationFailed(
+                "No items were selected for cleanup.".to_string(),
+            ));
+        }
+
+        let audit_session_id = request
+            .session_id
+            .as_deref()
+            .and_then(|sid| Self::existing_session_id(conn, sid))
+            .or_else(|| crate::storage::resolve_session_id(conn, None).ok());
+
+        let mut results = Vec::with_capacity(request.items.len());
+        let mut successful_count = 0usize;
+        let mut failed_count = 0usize;
+        let mut bytes_reclaimed = 0i64;
+
+        for item in &request.items {
+            let op_result = Self::process_single_cleanup_item(
+                conn,
+                &request.batch_id,
+                audit_session_id.as_deref(),
+                item,
+                request.use_recycle_bin,
+            )?;
+            if op_result.status == "success" {
+                successful_count += 1;
+                bytes_reclaimed += op_result.size_bytes;
+            } else {
+                failed_count += 1;
+            }
+            results.push(op_result);
+        }
+
+        Ok(ExecuteCleanupResponse {
+            batch_id: request.batch_id,
+            total_attempted: request.items.len(),
+            successful_count,
+            failed_count,
+            bytes_reclaimed,
+            results,
+        })
+    }
+
+    fn process_single_cleanup_item(
+        conn: &Connection,
+        batch_id: &str,
+        audit_session_id: Option<&str>,
+        item: &DirectCleanupItemInput,
+        use_recycle_bin: bool,
+    ) -> Result<CleanupOperationResult> {
+        // 1. Re-validate security safeguards & relative path traversal immediately before deletion
+        if let Err(reason) = safeguards::validate_path_safety(&item.path) {
+            warn!("Refusing to clean unsafe/protected path: {} ({})", item.path, reason);
+
+            Self::log_audit_event(
+                conn,
+                batch_id,
+                audit_session_id,
+                &item.path,
+                &item.name,
+                item.size_bytes,
+                &item.category,
+                &item.risk_level,
+                "skipped",
+                "blocked_security",
+                false,
+                Some(&reason),
+            )?;
+
+            return Ok(CleanupOperationResult {
+                id: item.id.clone(),
+                path: item.path.clone(),
+                name: item.name.clone(),
+                size_bytes: item.size_bytes,
+                status: "blocked_security".to_string(),
+                cleanup_method: "skipped".to_string(),
+                is_reversible: false,
+                error_message: Some(reason),
+            });
+        }
+
+        let path_obj = Path::new(&item.path);
+
+        // 2. Validate current disk existence (symlink_metadata allows broken symlinks to still be deleted cleanly)
+        if Self::fs_symlink_missing(path_obj) {
+            let err_msg = "Path does not exist on disk (may have been moved or previously deleted)".to_string();
+            Self::log_audit_event(
+                conn,
+                batch_id,
+                audit_session_id,
+                &item.path,
+                &item.name,
+                item.size_bytes,
+                &item.category,
+                &item.risk_level,
+                "skipped",
+                "not_found",
+                false,
+                Some(&err_msg),
+            )?;
+
+            return Ok(CleanupOperationResult {
+                id: item.id.clone(),
+                path: item.path.clone(),
+                name: item.name.clone(),
+                size_bytes: item.size_bytes,
+                status: "not_found".to_string(),
+                cleanup_method: "skipped".to_string(),
+                is_reversible: false,
+                error_message: Some(err_msg),
+            });
+        }
+
+        // 3. Perform deletion (preferring reversible Recycle Bin / Trash)
+        let op_res: std::result::Result<(&str, bool), (&str, bool, &str, String)> =
+            if use_recycle_bin {
+                trash::delete(path_obj)
+                    .map(|_| ("recycle_bin", true))
+                    .map_err(|e| {
+                        let err_str = e.to_string();
+                        let lower = err_str.to_lowercase();
+                        let status = if lower.contains("permission") || lower.contains("access") {
+                            "permission_denied"
+                        } else if lower.contains("in use")
+                            || lower.contains("busy")
+                            || lower.contains("sharing")
+                        {
+                            "in_use"
+                        } else {
+                            "failed"
+                        };
+                        ("recycle_bin", true, status, err_str)
+                    })
+            } else {
+                Self::permanently_delete_path(path_obj)
+                    .map(|_| ("permanent_delete", false))
+                    .map_err(|e| {
+                        let status = match e.kind() {
+                            std::io::ErrorKind::PermissionDenied => "permission_denied",
+                            std::io::ErrorKind::NotFound => "not_found",
+                            _ => "failed",
+                        };
+                        ("permanent_delete", false, status, e.to_string())
+                    })
+            };
+
+        match op_res {
+            Ok((method, is_reversible)) => {
+                info!(method = method, path = %item.path, "Cleanup deletion succeeded");
+                Self::log_audit_event(
+                    conn,
+                    batch_id,
+                    audit_session_id,
+                    &item.path,
+                    &item.name,
+                    item.size_bytes,
+                    &item.category,
+                    &item.risk_level,
+                    method,
+                    "success",
+                    is_reversible,
+                    None,
+                )?;
+
+                if let Err(e) = Self::record_deleted_path_in_db(
+                    conn,
+                    audit_session_id,
+                    &item.id,
+                    &item.path,
+                ) {
+                    warn!(path = %item.path, error = %e, "Failed to update DB rollups after cleanup");
+                }
+
+                Ok(CleanupOperationResult {
+                    id: item.id.clone(),
+                    path: item.path.clone(),
+                    name: item.name.clone(),
+                    size_bytes: item.size_bytes,
+                    status: "success".to_string(),
+                    cleanup_method: method.to_string(),
+                    is_reversible,
+                    error_message: None,
+                })
+            }
+            Err((method, is_reversible, status, err_str)) => {
+                warn!(method = method, path = %item.path, error = %err_str, "Cleanup deletion failed");
+                Self::log_audit_event(
+                    conn,
+                    batch_id,
+                    audit_session_id,
+                    &item.path,
+                    &item.name,
+                    item.size_bytes,
+                    &item.category,
+                    &item.risk_level,
+                    method,
+                    status,
+                    is_reversible,
+                    Some(&err_str),
+                )?;
+
+                Ok(CleanupOperationResult {
+                    id: item.id.clone(),
+                    path: item.path.clone(),
+                    name: item.name.clone(),
+                    size_bytes: item.size_bytes,
+                    status: status.to_string(),
+                    cleanup_method: method.to_string(),
+                    is_reversible,
+                    error_message: Some(err_str),
+                })
+            }
+        }
     }
 
     fn existing_session_id(conn: &Connection, session_id: &str) -> Option<String> {
@@ -432,6 +510,10 @@ impl CleanupService {
         } else {
             None
         }
+    }
+
+    fn fs_symlink_missing(path_obj: &Path) -> bool {
+        std::fs::symlink_metadata(path_obj).is_err()
     }
 
     fn permanently_delete_path(path_obj: &Path) -> std::io::Result<()> {
@@ -1053,6 +1135,79 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM file_hashes WHERE path = ?1", [&file_str], |r| r.get(0))
             .unwrap();
         assert_eq!(hash_cnt, 0);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_direct_cleanup_enforces_confirmation_and_safeguards() {
+        use crate::models::cleanup::{DirectCleanupItemInput, ExecuteDirectCleanupRequest};
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::storage::migrator::Migrator::run(&mut conn).unwrap();
+
+        let temp_dir = std::env::temp_dir().join(format!("diskatlas_direct_clean_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let target_file = temp_dir.join("cache_blob.bin");
+        fs::write(&target_file, vec![0u8; 512]).unwrap();
+        let target_str = target_file.to_string_lossy().to_string();
+
+        // 1. Must reject without exact CONFIRM_CLEANUP permission phrase
+        let unconfirmed = CleanupService::execute_direct_cleanup(
+            &conn,
+            ExecuteDirectCleanupRequest {
+                batch_id: "b1".to_string(),
+                session_id: None,
+                items: vec![DirectCleanupItemInput {
+                    id: "qs-1".to_string(),
+                    path: target_str.clone(),
+                    name: "cache_blob.bin".to_string(),
+                    size_bytes: 512,
+                    category: "temporary".to_string(),
+                    risk_level: "low".to_string(),
+                }],
+                use_recycle_bin: false,
+                confirmation_phrase: "".to_string(),
+            },
+        );
+        assert!(unconfirmed.is_err());
+        assert!(target_file.exists(), "File must remain untouched without permission");
+
+        // 2. Confirmed cleanup deletes target and blocks critical paths
+        let res = CleanupService::execute_direct_cleanup(
+            &conn,
+            ExecuteDirectCleanupRequest {
+                batch_id: "b2".to_string(),
+                session_id: None,
+                items: vec![
+                    DirectCleanupItemInput {
+                        id: "qs-1".to_string(),
+                        path: target_str,
+                        name: "cache_blob.bin".to_string(),
+                        size_bytes: 512,
+                        category: "temporary".to_string(),
+                        risk_level: "low".to_string(),
+                    },
+                    DirectCleanupItemInput {
+                        id: "qs-sys".to_string(),
+                        path: "/System".to_string(),
+                        name: "System".to_string(),
+                        size_bytes: 1000,
+                        category: "os".to_string(),
+                        risk_level: "critical".to_string(),
+                    },
+                ],
+                use_recycle_bin: false,
+                confirmation_phrase: "CONFIRM_CLEANUP".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(res.successful_count, 1);
+        assert_eq!(res.failed_count, 1);
+        assert_eq!(res.results[1].status, "blocked_security");
+        assert!(!target_file.exists());
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

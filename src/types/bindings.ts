@@ -66,15 +66,15 @@ export interface DatabaseHealth {
 export interface DatabaseIntegrityReport {
   ok: boolean;
   details: string[];
-  migrationVersion: number;
-  walMode: string;
+  dbSizeBytes: number;
+  walSizeBytes: number;
 }
 
 export interface DatabaseMaintenanceReport {
-  vacuumed: boolean;
-  walCheckpointed: boolean;
-  dbSizeBeforeBytes: number;
-  dbSizeAfterBytes: number;
+  ok: boolean;
+  previousBytes: number;
+  currentBytes: number;
+  reclaimedBytes: number;
   message: string;
 }
 
@@ -765,6 +765,105 @@ export interface CleanupAuditResponse {
   page: number;
   pageSize: number;
   totalPages: number;
+}
+
+export interface QuickSweepItem {
+  id: string;
+  path: string;
+  name: string;
+  sizeBytes: number;
+  fileCount: number;
+  sweepGroup: string;
+  groupLabel: string;
+  category: string;
+  recGroup: 'safe_to_review' | 'review_required' | 'system_protected' | 'move_or_archive' | 'uninstall_official';
+  riskLevel: 'none' | 'low' | 'moderate' | 'high' | 'critical';
+  reason: string;
+  expectedConsequences: string;
+  recommendedAction: string;
+  ageDays: number;
+  isCloudSynced: boolean;
+  cloudWarning?: string | null;
+  isBlocked: boolean;
+  blockReason?: string | null;
+  selected: boolean;
+  existsOnDisk: boolean;
+}
+
+export interface QuickSweepGroupTotal {
+  sweepGroup: string;
+  label: string;
+  itemCount: number;
+  totalBytes: number;
+}
+
+export interface QuickSweepReport {
+  scanId: string;
+  durationMillis: number;
+  items: QuickSweepItem[];
+  totalBytes: number;
+  safeBytes: number;
+  reviewBytes: number;
+  totalItems: number;
+  categoryTotals: QuickSweepGroupTotal[];
+}
+
+export interface DirectCleanupItemInput {
+  id: string;
+  path: string;
+  name: string;
+  sizeBytes: number;
+  category: string;
+  riskLevel: string;
+}
+
+export interface ExecuteDirectCleanupRequest {
+  batchId: string;
+  sessionId?: string | null;
+  items: DirectCleanupItemInput[];
+  useRecycleBin: boolean;
+  confirmationPhrase: string;
+}
+
+export interface AppAssociatedPath {
+  path: string;
+  kind: string;
+  sizeBytes: number;
+  isCacheSafe: boolean;
+}
+
+export interface InstalledAppInfo {
+  id: string;
+  name: string;
+  bundleId: string | null;
+  version: string | null;
+  appPath: string;
+  bundleSizeBytes: number;
+  supportSizeBytes: number;
+  cacheSizeBytes: number;
+  associatedPaths: AppAssociatedPath[];
+  isSystemApp: boolean;
+}
+
+export interface AppLeftoverItem {
+  id: string;
+  appHint: string;
+  bundleId: string | null;
+  path: string;
+  kind: string;
+  sizeBytes: number;
+  fileCount: number;
+  isCacheSafe: boolean;
+  reason: string;
+}
+
+export interface ApplicationsInventoryReport {
+  apps: InstalledAppInfo[];
+  leftovers: AppLeftoverItem[];
+  totalAppsBytes: number;
+  totalSupportBytes: number;
+  totalLeftoversBytes: number;
+  scanDurationMillis: number;
 }
 
 

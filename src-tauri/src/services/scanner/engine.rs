@@ -1,7 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
@@ -9,6 +10,7 @@ use tracing::{debug, info, warn};
 
 use crate::error::Result;
 use crate::models::scan::{ScanProgress, ScanStatus, ScanSummary};
+use crate::services::scanner::fast_walker::{effective_file_size, metadata_timestamps};
 use crate::services::scanner::models::{RawDirItem, RawErrorItem, RawFileItem, ScanOptions};
 use crate::storage::DbPool;
 
@@ -19,76 +21,122 @@ pub const STATUS_CANCELLED: u8 = 2;
 pub const STATUS_COMPLETED: u8 = 3;
 pub const STATUS_FAILED: u8 = 4;
 
+struct DirTask {
+    path: PathBuf,
+    known_dev_ino: Option<(u64, u64)>,
+    created_at: Option<i64>,
+    modified_at: Option<i64>,
+}
+
+struct WorkQueueState {
+    stack: Vec<DirTask>,
+    active_workers: usize,
+    closed: bool,
+}
+
+struct ProgressSyncState {
+    recent_files: VecDeque<String>,
+    current_file: Option<String>,
+    current_path: String,
+}
+
+struct WriteBatchMsg {
+    files: Vec<RawFileItem>,
+    errors: Vec<RawErrorItem>,
+}
+
 pub struct ScanEngine;
 
 impl ScanEngine {
     #[allow(clippy::too_many_arguments)]
-    fn emit_progress_if_needed(
+    fn emit_shared_progress(
         options: &ScanOptions,
         status_flag: &AtomicU8,
-        files_scanned: u64,
-        dirs_scanned: u64,
-        bytes_scanned: u64,
-        error_count: u64,
-        current_path: &Path,
-        current_file: Option<&str>,
-        recent_files: &[String],
+        files_atom: &AtomicU64,
+        dirs_atom: &AtomicU64,
+        bytes_atom: &AtomicU64,
+        errors_atom: &AtomicU64,
+        latest_dir: &Path,
+        latest_file: Option<&str>,
+        push_recent: bool,
         start_time: Instant,
+        next_emit_ms: &AtomicU64,
+        progress_sync: &Mutex<ProgressSyncState>,
         progress: &Arc<Mutex<ScanProgress>>,
         app_handle: &Option<AppHandle>,
-        last_emit: &mut Instant,
         force: bool,
     ) {
         let status_code = status_flag.load(Ordering::SeqCst);
         if status_code == STATUS_CANCELLED {
             return;
         }
+
+        let elapsed_millis = start_time.elapsed().as_millis() as u64;
+        if !force {
+            let prev_ms = next_emit_ms.load(Ordering::Relaxed);
+            if elapsed_millis < prev_ms.saturating_add(80) {
+                return;
+            }
+            if next_emit_ms
+                .compare_exchange(prev_ms, elapsed_millis, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+            {
+                return;
+            }
+        } else {
+            next_emit_ms.store(elapsed_millis, Ordering::Relaxed);
+        }
+
         let live_status = match status_code {
             STATUS_PAUSED => ScanStatus::Paused,
             STATUS_FAILED => ScanStatus::Failed,
             _ => ScanStatus::Running,
         };
 
-        // Always keep the shared in-memory progress struct updated so get_scan_progress queries see live numbers
-        let elapsed_millis = start_time.elapsed().as_millis() as u64;
-        let path_str = current_path.to_string_lossy().to_string();
-        let file_opt = current_file.map(|s| s.to_string());
+        let dir_str = latest_dir.to_string_lossy().to_string();
+        let (cur_file_snap, recent_snap) = {
+            let mut sync = progress_sync.lock().unwrap_or_else(|e| e.into_inner());
+            sync.current_path = dir_str.clone();
+            if let Some(f) = latest_file {
+                sync.current_file = Some(f.to_string());
+                if push_recent {
+                    if sync.recent_files.len() >= 10 {
+                        sync.recent_files.pop_front();
+                    }
+                    sync.recent_files.push_back(f.to_string());
+                }
+            }
+            (
+                sync.current_file.clone(),
+                sync.recent_files.iter().cloned().collect::<Vec<String>>(),
+            )
+        };
+
+        let files_scanned = files_atom.load(Ordering::Relaxed);
+        let dirs_scanned = dirs_atom.load(Ordering::Relaxed);
+        let bytes_scanned = bytes_atom.load(Ordering::Relaxed);
+        let error_count = errors_atom.load(Ordering::Relaxed);
+
+        let snap = ScanProgress {
+            session_id: options.session_id.clone(),
+            drive_id: options.drive_id.clone(),
+            root_path: options.root_path.to_string_lossy().to_string(),
+            status: live_status,
+            files_scanned,
+            dirs_scanned,
+            bytes_scanned,
+            error_count,
+            current_path: dir_str,
+            current_file: cur_file_snap,
+            recent_files: recent_snap,
+            elapsed_millis,
+        };
 
         if let Ok(mut p) = progress.lock() {
-            p.status = live_status;
-            p.files_scanned = files_scanned;
-            p.dirs_scanned = dirs_scanned;
-            p.bytes_scanned = bytes_scanned;
-            p.error_count = error_count;
-            p.current_path = path_str.clone();
-            p.current_file = file_opt.clone();
-            if !recent_files.is_empty() {
-                p.recent_files = recent_files.to_vec();
-            }
-            p.elapsed_millis = elapsed_millis;
+            *p = snap.clone();
         }
-
-        // Throttle UI event emissions over Tauri IPC to prevent webview event starvation (emit at least every 80ms)
-        if force || last_emit.elapsed() >= Duration::from_millis(80) {
-            if let Some(ref handle) = app_handle {
-                let current_progress = ScanProgress {
-                    session_id: options.session_id.clone(),
-                    drive_id: options.drive_id.clone(),
-                    root_path: options.root_path.to_string_lossy().to_string(),
-                    status: live_status,
-                    files_scanned,
-                    dirs_scanned,
-                    bytes_scanned,
-                    error_count,
-                    current_path: path_str,
-                    current_file: file_opt,
-                    recent_files: recent_files.to_vec(),
-                    elapsed_millis,
-                };
-                handle.emit("scan://progress", &current_progress).ok();
-            }
-
-            *last_emit = Instant::now();
+        if let Some(ref handle) = app_handle {
+            handle.emit("scan://progress", &snap).ok();
         }
     }
 
@@ -141,26 +189,52 @@ impl ScanEngine {
         info!("Scan session '{}' cancelled by user", options.session_id);
         Self::mark_session_registered(db_pool, options, session_registered)?;
 
-        if !file_batch.is_empty() || !error_batch.is_empty() {
-            let mut empty_dirs = Vec::new();
-            Self::flush_batches(db_pool, &options.session_id, file_batch, &mut empty_dirs, error_batch)?;
-        }
-        if !dir_map.is_empty() {
-            Self::rollup_and_flush_directories(
-                db_pool,
-                &options.session_id,
-                dir_map,
-                options.batch_size,
-                &options.root_path,
-            )?;
-            Self::ensure_root_directory_row(
-                db_pool,
-                &options.session_id,
-                &options.root_path,
-                files_scanned,
-                dirs_scanned,
-                bytes_scanned,
-            )?;
+        // If this drive already has a completed baseline scan, discard partial rows from the
+        // cancelled run so aborted scans never accumulate dead storage in SQLite.
+        let has_completed_for_drive: bool = db_pool
+            .with_read_conn(|conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM scan_sessions
+                            WHERE drive_id = ?1
+                              AND id != ?2
+                              AND status IN ('completed', 'completed_with_errors', 'completedWithErrors')
+                        )",
+                        rusqlite::params![&options.drive_id, &options.session_id],
+                        |r| r.get::<_, bool>(0),
+                    )
+                    .unwrap_or(false))
+            })
+            .unwrap_or(false);
+
+        if has_completed_for_drive {
+            file_batch.clear();
+            error_batch.clear();
+            dir_map.clear();
+            let _ = db_pool.prune_session_heavy_data(&options.session_id);
+        } else {
+            if !file_batch.is_empty() || !error_batch.is_empty() {
+                let mut empty_dirs = Vec::new();
+                Self::flush_batches(db_pool, &options.session_id, file_batch, &mut empty_dirs, error_batch)?;
+            }
+            if !dir_map.is_empty() {
+                Self::rollup_and_flush_directories(
+                    db_pool,
+                    &options.session_id,
+                    dir_map,
+                    options.batch_size,
+                    &options.root_path,
+                )?;
+                Self::ensure_root_directory_row(
+                    db_pool,
+                    &options.session_id,
+                    &options.root_path,
+                    files_scanned,
+                    dirs_scanned,
+                    bytes_scanned,
+                )?;
+            }
         }
 
         Self::update_session_status(
@@ -172,6 +246,10 @@ impl ScanEngine {
             bytes_scanned,
             error_count,
         )?;
+
+        if let Err(err) = db_pool.reclaim_free_pages(false) {
+            warn!("Cancelled scan WAL checkpoint / reclaim failed: {}", err);
+        }
 
         let duration_millis = start_time.elapsed().as_millis() as u64;
         if let Ok(mut p) = progress.lock() {
@@ -230,44 +308,24 @@ impl ScanEngine {
             debug!("SQLite write lock busy at scan start; starting filesystem traversal immediately");
         }
 
-        // Cycle detection: track visited inodes or canonical paths
+        // Cycle detection shared safely across bounded worker pool
         #[cfg(unix)]
-        let mut visited_inodes: HashSet<(u64, u64)> = HashSet::new();
+        let visited_dirs: Mutex<HashSet<(u64, u64)>> = Mutex::new(HashSet::new());
         #[cfg(unix)]
-        let mut visited_file_inodes: HashSet<(u64, u64)> = HashSet::new();
+        let visited_file_inodes: Mutex<HashSet<(u64, u64)>> = Mutex::new(HashSet::new());
         #[cfg(not(unix))]
-        let mut visited_paths: HashSet<PathBuf> = HashSet::new();
+        let visited_dirs: Mutex<HashSet<PathBuf>> = Mutex::new(HashSet::new());
 
-        // Work stack of directories to traverse (avoids call-stack recursion).
-        // On macOS (APFS Signed System Volume), root '/' mounts an immutable sealed OS snapshot (/System, /usr, /bin, /sbin).
-        // The real mutable user files, installed applications, developer caches, and libraries reside in firmlinked roots.
-        // Seeding directly with the mutable roots provides 50x faster scanning while capturing 100% of user data.
+        // Seed work queue with root targets (macOS skips sealed SSV `/System` snapshot).
         #[cfg(target_os = "macos")]
-        let mut dir_stack: Vec<PathBuf> = if options.root_path == std::path::Path::new("/") {
+        let seed_paths: Vec<PathBuf> = if options.root_path == std::path::Path::new("/") {
             let mut roots = Vec::new();
-            // Note: dir_stack is a LIFO stack. Elements are popped from back to front.
-            // Seeding system directories first and $HOME last ensures user files are traversed first!
-            let opt = PathBuf::from("/opt");
-            if opt.exists() {
-                roots.push(opt);
+            for candidate in ["/opt", "/usr/local", "/Library", "/Applications", "/Users/Shared"] {
+                let p = PathBuf::from(candidate);
+                if p.exists() {
+                    roots.push(p);
+                }
             }
-            let usr_local = PathBuf::from("/usr/local");
-            if usr_local.exists() {
-                roots.push(usr_local);
-            }
-            let lib = PathBuf::from("/Library");
-            if lib.exists() {
-                roots.push(lib);
-            }
-            let apps = PathBuf::from("/Applications");
-            if apps.exists() {
-                roots.push(apps);
-            }
-            let shared = PathBuf::from("/Users/Shared");
-            if shared.exists() {
-                roots.push(shared);
-            }
-            // Seed any additional user profiles in /Users if accessible
             if let Ok(entries) = fs::read_dir("/Users") {
                 for entry in entries.flatten() {
                     let p = entry.path();
@@ -276,7 +334,6 @@ impl ScanEngine {
                     }
                 }
             }
-            // Always seed current user's HOME directory last so it is popped FIRST from the stack!
             if let Ok(home) = std::env::var("HOME") {
                 let home_path = PathBuf::from(&home);
                 if home_path.exists() {
@@ -294,28 +351,19 @@ impl ScanEngine {
         };
 
         #[cfg(not(target_os = "macos"))]
-        let mut dir_stack: Vec<PathBuf> = vec![options.root_path.clone()];
+        let seed_paths: Vec<PathBuf> = vec![options.root_path.clone()];
 
-        // In-memory directory aggregation map for bottom-up recursive sizing
-        let mut dir_map: std::collections::HashMap<String, RawDirItem> = std::collections::HashMap::new();
+        let initial_tasks: Vec<DirTask> = seed_paths
+            .into_iter()
+            .map(|p| DirTask {
+                path: p,
+                known_dev_ino: None,
+                created_at: None,
+                modified_at: None,
+            })
+            .collect();
 
-        // Batch buffers for SQLite writes
-        let mut file_batch: Vec<RawFileItem> = Vec::with_capacity(options.batch_size);
-        let mut error_batch: Vec<RawErrorItem> = Vec::with_capacity(100);
-
-        let mut files_scanned: u64 = 0;
-        let mut dirs_scanned: u64 = 0;
-        let mut bytes_scanned: u64 = 0;
-        let mut error_count: u64 = 0;
         let root_display = options.root_path.to_string_lossy().to_string();
-        #[allow(unused_assignments)]
-        let mut current_file: Option<String> = None;
-        let mut recent_files: Vec<String> = Vec::new();
-        // Initialize last_emit 200ms in the past so the first visited directory immediately emits live feedback to UI
-        let mut last_emit = Instant::now().checked_sub(Duration::from_millis(200)).unwrap_or_else(Instant::now);
-        let mut loop_counter: usize = 0;
-
-        // Immediately emit initial progress event so UI receives active scanning feedback
         if status.load(Ordering::SeqCst) != STATUS_CANCELLED {
             if let Some(ref handle) = app_handle {
                 let initial = ScanProgress {
@@ -327,7 +375,7 @@ impl ScanEngine {
                     dirs_scanned: 0,
                     bytes_scanned: 0,
                     error_count: 0,
-                    current_path: root_display,
+                    current_path: root_display.clone(),
                     current_file: None,
                     recent_files: Vec::new(),
                     elapsed_millis: 0,
@@ -336,421 +384,532 @@ impl ScanEngine {
             }
         }
 
-        while let Some(current_dir) = dir_stack.pop() {
-            // Check cancellation & pause before popping progress or advancing traversal
-            if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
-                return Self::finalize_cancelled_scan(
-                    &db_pool,
-                    &options,
-                    &mut session_registered,
-                    &mut dir_map,
-                    &mut file_batch,
-                    &mut error_batch,
-                    files_scanned,
-                    dirs_scanned,
-                    bytes_scanned,
-                    error_count,
-                    start_time,
-                    &progress,
-                    &app_handle,
-                );
-            }
+        let work_queue = Mutex::new(WorkQueueState {
+            stack: initial_tasks,
+            active_workers: 0,
+            closed: false,
+        });
+        let queue_cv = Condvar::new();
 
-            if status.load(Ordering::SeqCst) == STATUS_PAUSED {
-                let (lock, cvar) = &*pause_signal;
-                let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                while status.load(Ordering::SeqCst) == STATUS_PAUSED {
-                    debug!("Scan session '{}' paused, waiting...", options.session_id);
-                    guard = cvar
-                        .wait_timeout(guard, Duration::from_millis(200))
-                        .unwrap_or_else(|e| e.into_inner())
-                        .0;
-                }
-            }
+        let files_atom = AtomicU64::new(0);
+        let dirs_atom = AtomicU64::new(0);
+        let bytes_atom = AtomicU64::new(0);
+        let errors_atom = AtomicU64::new(0);
+        let next_emit_ms = AtomicU64::new(0);
+        let progress_sync = Mutex::new(ProgressSyncState {
+            recent_files: VecDeque::with_capacity(10),
+            current_file: None,
+            current_path: root_display,
+        });
 
-            if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
-                return Self::finalize_cancelled_scan(
-                    &db_pool,
-                    &options,
-                    &mut session_registered,
-                    &mut dir_map,
-                    &mut file_batch,
-                    &mut error_batch,
-                    files_scanned,
-                    dirs_scanned,
-                    bytes_scanned,
-                    error_count,
-                    start_time,
-                    &progress,
-                    &app_handle,
-                );
-            }
+        let batch_limit = options.batch_size.max(1);
+        let worker_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(4, 8);
 
-            loop_counter += 1;
+        let (batch_tx, batch_rx) = mpsc::sync_channel::<WriteBatchMsg>(16);
 
-            // Emit live progress when visiting a new directory (force emit for first 10 directories)
-            Self::emit_progress_if_needed(
-                &options,
-                &status,
-                files_scanned,
-                dirs_scanned,
-                bytes_scanned,
-                error_count,
-                &current_dir,
-                current_file.as_deref(),
-                &recent_files,
-                start_time,
-                &progress,
-                &app_handle,
-                &mut last_emit,
-                loop_counter <= 10,
-            );
+        let mut dir_map: HashMap<String, RawDirItem> = HashMap::new();
+        let mut writer_error: Option<crate::error::AppError> = None;
 
-            // Cooperative yielding on dedicated OS thread to avoid CPU monopolization
-            if loop_counter % 32 == 0 {
-                std::thread::yield_now();
-            }
-
-            // Check system internal boundary exclusions (e.g. /System/Volumes firmlinks, /Volumes external mounts, /dev)
-            if Self::is_system_internal_exclusion(&current_dir, &options.root_path) {
-                debug!("Skipping system internal directory: {}", current_dir.display());
-                Self::emit_progress_if_needed(
-                    &options,
-                    &status,
-                    files_scanned,
-                    dirs_scanned,
-                    bytes_scanned,
-                    error_count,
-                    &current_dir,
-                    current_file.as_deref(),
-                    &recent_files,
-                    start_time,
-                    &progress,
-                    &app_handle,
-                    &mut last_emit,
-                    false,
-                );
-                continue;
-            }
-
-            // Check user-configured exclusions
-            let current_dir_str = current_dir.to_string_lossy();
-            if Self::is_excluded(&current_dir_str, &options.exclusions) {
-                debug!("Skipping excluded directory: {}", current_dir.display());
-                Self::emit_progress_if_needed(
-                    &options,
-                    &status,
-                    files_scanned,
-                    dirs_scanned,
-                    bytes_scanned,
-                    error_count,
-                    &current_dir,
-                    current_file.as_deref(),
-                    &recent_files,
-                    start_time,
-                    &progress,
-                    &app_handle,
-                    &mut last_emit,
-                    false,
-                );
-                continue;
-            }
-
-            // Loop and junction detection
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                if let Ok(m) = fs::symlink_metadata(&current_dir) {
-                    let key = (m.dev(), m.ino());
-                    if !visited_inodes.insert(key) {
-                        debug!("Cycle detected on directory '{}', skipping loop", current_dir.display());
-                        Self::emit_progress_if_needed(
-                            &options,
-                            &status,
-                            files_scanned,
-                            dirs_scanned,
-                            bytes_scanned,
-                            error_count,
-                            &current_dir,
-                            current_file.as_deref(),
-                            &recent_files,
-                            start_time,
-                            &progress,
-                            &app_handle,
-                            &mut last_emit,
-                            false,
-                        );
+        std::thread::scope(|scope| {
+            // Dedicated pipelined SQLite writer thread so scanner workers never block on DB commits.
+            let db_ref = &db_pool;
+            let opts_ref = &options;
+            let writer_handle = scope.spawn(move || -> Result<bool> {
+                let mut writer_registered = session_registered;
+                while let Ok(mut msg) = batch_rx.recv() {
+                    if msg.files.is_empty() && msg.errors.is_empty() {
                         continue;
                     }
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                if let Ok(canon) = fs::canonicalize(&current_dir) {
-                    if !visited_paths.insert(canon) {
-                        debug!("Cycle detected on directory '{}', skipping loop", current_dir.display());
-                        Self::emit_progress_if_needed(
-                            &options,
-                            &status,
-                            files_scanned,
-                            dirs_scanned,
-                            bytes_scanned,
-                            error_count,
-                            &current_dir,
-                            current_file.as_deref(),
-                            &recent_files,
-                            start_time,
-                            &progress,
-                            &app_handle,
-                            &mut last_emit,
-                            false,
-                        );
-                        continue;
+                    if !writer_registered {
+                        let conn = db_ref.lock_conn();
+                        Self::ensure_session_registered(&conn, opts_ref)?;
+                        writer_registered = true;
                     }
+                    let mut empty_dirs = Vec::new();
+                    Self::flush_batches(
+                        db_ref,
+                        &opts_ref.session_id,
+                        &mut msg.files,
+                        &mut empty_dirs,
+                        &mut msg.errors,
+                    )?;
                 }
-            }
+                Ok(writer_registered)
+            });
 
-            // Read directory contents safely (read-only)
-            let read_dir_result = fs::read_dir(&current_dir);
-            let entries = match read_dir_result {
-                Ok(entries) => {
-                    dirs_scanned += 1;
-                    entries
-                }
-                Err(err) => {
-                    dirs_scanned += 1;
-                    error_count += 1;
-                    let err_type = match err.kind() {
-                        std::io::ErrorKind::PermissionDenied => "PermissionDenied",
-                        std::io::ErrorKind::NotFound => "NotFound",
-                        _ => "IoError",
-                    };
-                    error_batch.push(RawErrorItem {
-                        path: current_dir.to_string_lossy().to_string(),
-                        error_type: err_type.to_string(),
-                        message: err.to_string(),
-                    });
-                    debug!("Inaccessible protected path '{}': {}", current_dir.display(), err);
-                    Self::emit_progress_if_needed(
-                        &options,
-                        &status,
-                        files_scanned,
-                        dirs_scanned,
-                        bytes_scanned,
-                        error_count,
-                        &current_dir,
-                        current_file.as_deref(),
-                        &recent_files,
-                        start_time,
-                        &progress,
-                        &app_handle,
-                        &mut last_emit,
-                        true,
-                    );
-                    continue;
-                }
-            };
+            let mut worker_handles = Vec::with_capacity(worker_count);
+            for _ in 0..worker_count {
+                let w_tx: SyncSender<WriteBatchMsg> = batch_tx.clone();
+                let options = &options;
+                let status = &status;
+                let pause_signal = &pause_signal;
+                let progress = &progress;
+                let app_handle = &app_handle;
+                let work_queue = &work_queue;
+                let queue_cv = &queue_cv;
+                let visited_dirs = &visited_dirs;
+                #[cfg(unix)]
+                let visited_file_inodes = &visited_file_inodes;
+                let files_atom = &files_atom;
+                let dirs_atom = &dirs_atom;
+                let bytes_atom = &bytes_atom;
+                let errors_atom = &errors_atom;
+                let next_emit_ms = &next_emit_ms;
+                let progress_sync = &progress_sync;
 
-            let mut dir_file_count: u64 = 0;
-            let mut dir_total_bytes: u64 = 0;
-            let mut dir_subdirs: u64 = 0;
+                worker_handles.push(scope.spawn(move || -> HashMap<String, RawDirItem> {
+                    let mut local_dir_map: HashMap<String, RawDirItem> = HashMap::new();
+                    let mut local_files: Vec<RawFileItem> = Vec::with_capacity(batch_limit);
+                    let mut local_errors: Vec<RawErrorItem> = Vec::with_capacity(64);
 
-            for entry_res in entries {
-                let entry = match entry_res {
-                    Ok(e) => e,
-                    Err(err) => {
-                        error_count += 1;
-                        error_batch.push(RawErrorItem {
-                            path: current_dir.to_string_lossy().to_string(),
-                            error_type: "EntryReadError".to_string(),
-                            message: err.to_string(),
-                        });
-                        continue;
-                    }
-                };
-
-                let entry_path = entry.path();
-                let entry_name = entry.file_name().to_string_lossy().to_string();
-
-                // Safe symlink_metadata check
-                let meta = match fs::symlink_metadata(&entry_path) {
-                    Ok(m) => m,
-                    Err(err) => {
-                        error_count += 1;
-                        error_batch.push(RawErrorItem {
-                            path: entry_path.to_string_lossy().to_string(),
-                            error_type: "MetadataError".to_string(),
-                            message: err.to_string(),
-                        });
-                        continue;
-                    }
-                };
-
-                let is_symlink = meta.file_type().is_symlink();
-
-                if meta.is_dir() {
-                    dir_subdirs += 1;
-                    // Do not follow directory symlinks/reparse points to avoid double counting and loops
-                    if !is_symlink {
-                        if !Self::is_system_internal_exclusion(&entry_path, &options.root_path) {
-                            dir_stack.push(entry_path.clone());
+                    loop {
+                        if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
+                            let mut q = work_queue.lock().unwrap_or_else(|e| e.into_inner());
+                            q.closed = true;
+                            queue_cv.notify_all();
+                            break;
                         }
-                    }
-                } else if meta.is_file() || is_symlink {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::MetadataExt;
-                        // For files with multiple hard links, track physical inode so each unique data block is only sized once
-                        if meta.nlink() > 1 {
-                            let fkey = (meta.dev(), meta.ino());
-                            if !visited_file_inodes.insert(fkey) {
-                                // Inode already sized; skip multi-counting
+
+                        if status.load(Ordering::SeqCst) == STATUS_PAUSED {
+                            let (lock, cvar) = &**pause_signal;
+                            let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                            while status.load(Ordering::SeqCst) == STATUS_PAUSED {
+                                guard = cvar
+                                    .wait_timeout(guard, Duration::from_millis(150))
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .0;
+                            }
+                            if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
                                 continue;
                             }
                         }
-                    }
 
-                    // Compute allocated size where available
-                    let allocated_bytes = Self::get_allocated_bytes(&meta);
+                        let maybe_task = {
+                            let mut q = work_queue.lock().unwrap_or_else(|e| e.into_inner());
+                            loop {
+                                if status.load(Ordering::SeqCst) == STATUS_CANCELLED || q.closed {
+                                    q.closed = true;
+                                    queue_cv.notify_all();
+                                    break None;
+                                }
+                                if let Some(task) = q.stack.pop() {
+                                    q.active_workers += 1;
+                                    break Some(task);
+                                }
+                                if q.active_workers == 0 {
+                                    q.closed = true;
+                                    queue_cv.notify_all();
+                                    break None;
+                                }
+                                q = queue_cv.wait(q).unwrap_or_else(|e| e.into_inner());
+                            }
+                        };
 
-                    // For sparse files (e.g. VM images), bound by allocated physical blocks to prevent phantom gigabytes
-                    let raw_len = meta.len();
-                    let size = if let Some(alloc) = allocated_bytes {
-                        if raw_len > 10 * 1024 * 1024 && alloc < raw_len {
-                            alloc
-                        } else {
-                            raw_len
+                        let Some(task) = maybe_task else {
+                            break;
+                        };
+
+                        let finish_task = |children: Vec<DirTask>| {
+                            let mut q = work_queue.lock().unwrap_or_else(|e| e.into_inner());
+                            let pushed = !children.is_empty();
+                            if pushed {
+                                q.stack.extend(children);
+                            }
+                            q.active_workers = q.active_workers.saturating_sub(1);
+                            if pushed {
+                                queue_cv.notify_all();
+                            } else if q.stack.is_empty() && q.active_workers == 0 {
+                                q.closed = true;
+                                queue_cv.notify_all();
+                            }
+                        };
+
+                        let current_dir = task.path;
+
+                        // 1. Check exclusions before touching filesystem
+                        if Self::is_system_internal_exclusion(&current_dir, &options.root_path) {
+                            finish_task(Vec::new());
+                            continue;
                         }
-                    } else {
-                        raw_len
-                    };
+                        let current_dir_str = current_dir.to_string_lossy();
+                        if Self::is_excluded(&current_dir_str, &options.exclusions) {
+                            finish_task(Vec::new());
+                            continue;
+                        }
 
-                    files_scanned += 1;
-                    bytes_scanned += size;
-                    dir_file_count += 1;
-                    dir_total_bytes += size;
+                        // 2. Deduplicate only if root seed (`known_dev_ino == None`); children are pre-verified!
+                        let (dir_created, dir_modified) = if task.known_dev_ino.is_some() {
+                            (task.created_at, task.modified_at)
+                        } else {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::MetadataExt;
+                                if let Ok(m) = fs::symlink_metadata(&current_dir) {
+                                    let key = (m.dev(), m.ino());
+                                    if !visited_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(key) {
+                                        finish_task(Vec::new());
+                                        continue;
+                                    }
+                                    metadata_timestamps(&m)
+                                } else {
+                                    (None, None)
+                                }
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                if let Ok(canon) = fs::canonicalize(&current_dir) {
+                                    if !visited_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(canon) {
+                                        finish_task(Vec::new());
+                                        continue;
+                                    }
+                                }
+                                fs::symlink_metadata(&current_dir)
+                                    .map(|m| metadata_timestamps(&m))
+                                    .unwrap_or((None, None))
+                            }
+                        };
 
-                    // Extension extraction (normalized lowercase)
-                    let extension = entry_path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .map(|s| s.to_lowercase());
+                        // 3. Read directory contents
+                        let entries = match fs::read_dir(&current_dir) {
+                            Ok(e) => {
+                                dirs_atom.fetch_add(1, Ordering::Relaxed);
+                                e
+                            }
+                            Err(err) => {
+                                dirs_atom.fetch_add(1, Ordering::Relaxed);
+                                errors_atom.fetch_add(1, Ordering::Relaxed);
+                                let err_type = match err.kind() {
+                                    std::io::ErrorKind::PermissionDenied => "PermissionDenied",
+                                    std::io::ErrorKind::NotFound => "NotFound",
+                                    _ => "IoError",
+                                };
+                                local_errors.push(RawErrorItem {
+                                    path: current_dir_str.to_string(),
+                                    error_type: err_type.to_string(),
+                                    message: err.to_string(),
+                                });
+                                Self::emit_shared_progress(
+                                    &options,
+                                    &status,
+                                    &files_atom,
+                                    &dirs_atom,
+                                    &bytes_atom,
+                                    &errors_atom,
+                                    &current_dir,
+                                    None,
+                                    false,
+                                    start_time,
+                                    &next_emit_ms,
+                                    &progress_sync,
+                                    &progress,
+                                    &app_handle,
+                                    false,
+                                );
+                                finish_task(Vec::new());
+                                continue;
+                            }
+                        };
 
-                    let parent_str = current_dir.to_string_lossy().to_string();
-                    let (created_at, modified_at) = Self::get_timestamps(&meta);
-                    let (is_hidden, is_system) = Self::get_attributes(&entry_name, &meta, &entry_path);
-                    let path_str = entry_path.to_string_lossy().to_string();
+                        let mut dir_file_count: u64 = 0;
+                        let mut dir_total_bytes: u64 = 0;
+                        let mut dir_subdirs: u64 = 0;
+                        let mut pending_children: Vec<DirTask> = Vec::new();
+                        let mut entry_idx: usize = 0;
+                        let parent_str_owned = current_dir_str.to_string();
 
-                    current_file = Some(path_str.clone());
-                    if recent_files.len() >= 10 {
-                        recent_files.remove(0);
-                    }
-                    recent_files.push(path_str.clone());
+                        for entry_res in entries {
+                            entry_idx += 1;
+                            if entry_idx & 63 == 0 {
+                                if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
+                                    break;
+                                }
+                                if status.load(Ordering::SeqCst) == STATUS_PAUSED {
+                                    let (lock, cvar) = &**pause_signal;
+                                    let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                                    while status.load(Ordering::SeqCst) == STATUS_PAUSED {
+                                        guard = cvar
+                                            .wait_timeout(guard, Duration::from_millis(150))
+                                            .unwrap_or_else(|e| e.into_inner())
+                                            .0;
+                                    }
+                                    if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
+                                        break;
+                                    }
+                                }
+                            }
 
-                    // Microsecond in-memory classification during indexing avoids 15-minute post-scan DB table scans
-                    let class_res = crate::services::classifier::rules::RuleMatcher::classify(
-                        &path_str,
-                        &entry_name,
-                        extension.as_deref(),
-                        is_hidden,
-                        is_system,
-                    );
+                            let entry = match entry_res {
+                                Ok(e) => e,
+                                Err(err) => {
+                                    errors_atom.fetch_add(1, Ordering::Relaxed);
+                                    local_errors.push(RawErrorItem {
+                                        path: parent_str_owned.clone(),
+                                        error_type: "EntryReadError".to_string(),
+                                        message: err.to_string(),
+                                    });
+                                    continue;
+                                }
+                            };
 
-                    file_batch.push(RawFileItem {
-                        path: path_str,
-                        name: entry_name,
-                        extension,
-                        parent_path: parent_str,
-                        size_bytes: size,
-                        allocated_bytes,
-                        created_at,
-                        modified_at,
-                        is_hidden,
-                        is_system,
-                        is_symlink,
-                        category: class_res.category,
-                        subcategory: class_res.subcategory,
-                        app_name: class_res.app_name,
-                        confidence: class_res.confidence,
-                    });
+                            let entry_path = entry.path();
+                            let entry_name = entry.file_name().to_string_lossy().to_string();
 
-                    // Flush batch if buffer is full
-                    if file_batch.len() >= options.batch_size {
-                        Self::mark_session_registered(&db_pool, &options, &mut session_registered)?;
-                        let mut empty_dirs = Vec::new();
-                        Self::flush_batches(&db_pool, &options.session_id, &mut file_batch, &mut empty_dirs, &mut error_batch)?;
-                        std::thread::yield_now();
-                    }
+                            let meta = match fs::symlink_metadata(&entry_path) {
+                                Ok(m) => m,
+                                Err(err) => {
+                                    errors_atom.fetch_add(1, Ordering::Relaxed);
+                                    local_errors.push(RawErrorItem {
+                                        path: entry_path.to_string_lossy().to_string(),
+                                        error_type: "MetadataError".to_string(),
+                                        message: err.to_string(),
+                                    });
+                                    continue;
+                                }
+                            };
 
-                    // Throttle in-batch progress updates for large directories (emit on first file, every 30 files, or 80ms)
-                    if files_scanned == 1 || files_scanned % 30 == 0 || last_emit.elapsed() >= Duration::from_millis(80) {
-                        Self::emit_progress_if_needed(
+                            let is_symlink = meta.file_type().is_symlink();
+
+                            if meta.is_dir() {
+                                dir_subdirs += 1;
+                                if !is_symlink
+                                    && !Self::is_system_internal_exclusion(&entry_path, &options.root_path)
+                                {
+                                    #[cfg(unix)]
+                                    {
+                                        use std::os::unix::fs::MetadataExt;
+                                        let key = (meta.dev(), meta.ino());
+                                        if visited_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(key) {
+                                            let (c_at, m_at) = metadata_timestamps(&meta);
+                                            pending_children.push(DirTask {
+                                                path: entry_path,
+                                                known_dev_ino: Some(key),
+                                                created_at: c_at,
+                                                modified_at: m_at,
+                                            });
+                                        }
+                                    }
+                                    #[cfg(not(unix))]
+                                    {
+                                        if let Ok(canon) = fs::canonicalize(&entry_path) {
+                                            if visited_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(canon) {
+                                                let (c_at, m_at) = metadata_timestamps(&meta);
+                                                pending_children.push(DirTask {
+                                                    path: entry_path,
+                                                    known_dev_ino: Some((0, 0)),
+                                                    created_at: c_at,
+                                                    modified_at: m_at,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            } else if meta.is_file() || is_symlink {
+                                #[cfg(unix)]
+                                {
+                                    use std::os::unix::fs::MetadataExt;
+                                    if meta.nlink() > 1 {
+                                        let fkey = (meta.dev(), meta.ino());
+                                        if !visited_file_inodes
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner())
+                                            .insert(fkey)
+                                        {
+                                            continue;
+                                        }
+                                    }
+                                }
+
+                                let (size, allocated_bytes) = effective_file_size(&meta);
+                                let new_files = files_atom.fetch_add(1, Ordering::Relaxed) + 1;
+                                bytes_atom.fetch_add(size, Ordering::Relaxed);
+                                dir_file_count += 1;
+                                dir_total_bytes += size;
+
+                                let extension = entry_path
+                                    .extension()
+                                    .and_then(|e| e.to_str())
+                                    .map(|s| s.to_ascii_lowercase());
+
+                                let (created_at, modified_at) = metadata_timestamps(&meta);
+                                let (is_hidden, is_system) =
+                                    Self::get_attributes(&entry_name, &meta, &entry_path);
+                                let path_str = entry_path.to_string_lossy().to_string();
+
+                                if new_files <= 2 || new_files % 32 == 0 {
+                                    Self::emit_shared_progress(
+                                        &options,
+                                        &status,
+                                        &files_atom,
+                                        &dirs_atom,
+                                        &bytes_atom,
+                                        &errors_atom,
+                                        &current_dir,
+                                        Some(&path_str),
+                                        true,
+                                        start_time,
+                                        &next_emit_ms,
+                                        &progress_sync,
+                                        &progress,
+                                        &app_handle,
+                                        new_files <= 2,
+                                    );
+                                }
+
+                                let class_res = crate::services::classifier::rules::RuleMatcher::classify(
+                                    &path_str,
+                                    &entry_name,
+                                    extension.as_deref(),
+                                    is_hidden,
+                                    is_system,
+                                );
+
+                                local_files.push(RawFileItem {
+                                    path: path_str,
+                                    name: entry_name,
+                                    extension,
+                                    parent_path: parent_str_owned.clone(),
+                                    size_bytes: size,
+                                    allocated_bytes,
+                                    created_at,
+                                    modified_at,
+                                    is_hidden,
+                                    is_system,
+                                    is_symlink,
+                                    category: class_res.category,
+                                    subcategory: class_res.subcategory,
+                                    app_name: class_res.app_name,
+                                    confidence: class_res.confidence,
+                                });
+
+                                if local_files.len() >= batch_limit {
+                                    let send_files = std::mem::replace(
+                                        &mut local_files,
+                                        Vec::with_capacity(batch_limit),
+                                    );
+                                    let send_errors = std::mem::take(&mut local_errors);
+                                    let _ = w_tx.send(WriteBatchMsg {
+                                        files: send_files,
+                                        errors: send_errors,
+                                    });
+                                }
+                            }
+                        }
+
+                        let dir_name = current_dir
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| parent_str_owned.clone());
+                        let is_dir_hidden = dir_name.starts_with('.');
+                        let dir_parent = current_dir
+                            .parent()
+                            .map(|p| p.to_string_lossy().to_string());
+
+                        local_dir_map.insert(
+                            parent_str_owned.clone(),
+                            RawDirItem {
+                                path: parent_str_owned,
+                                name: dir_name,
+                                parent_path: dir_parent,
+                                file_count: dir_file_count,
+                                dir_count: dir_subdirs,
+                                total_size_bytes: dir_total_bytes,
+                                created_at: dir_created,
+                                modified_at: dir_modified,
+                                is_hidden: is_dir_hidden,
+                                is_system: false,
+                            },
+                        );
+
+                        Self::emit_shared_progress(
                             &options,
                             &status,
-                            files_scanned,
-                            dirs_scanned,
-                            bytes_scanned,
-                            error_count,
+                            &files_atom,
+                            &dirs_atom,
+                            &bytes_atom,
+                            &errors_atom,
                             &current_dir,
-                            current_file.as_deref(),
-                            &recent_files,
+                            None,
+                            false,
                             start_time,
+                            &next_emit_ms,
+                            &progress_sync,
                             &progress,
                             &app_handle,
-                            &mut last_emit,
                             false,
                         );
+
+                        finish_task(pending_children);
                     }
+
+                    if !local_files.is_empty() || !local_errors.is_empty() {
+                        let _ = w_tx.send(WriteBatchMsg {
+                            files: local_files,
+                            errors: local_errors,
+                        });
+                    }
+
+                    local_dir_map
+                }));
+            }
+
+            // Drop the original sender so writer_handle drains remaining queued batches and terminates.
+            drop(batch_tx);
+
+            for handle in worker_handles {
+                if let Ok(local_map) = handle.join() {
+                    dir_map.extend(local_map);
                 }
             }
 
-            // Record directory aggregation in memory map for bottom-up rollup
-            let (dir_created, dir_modified) = match fs::metadata(&current_dir) {
-                Ok(m) => Self::get_timestamps(&m),
-                Err(_) => (None, None),
-            };
+            match writer_handle.join() {
+                Ok(Ok(registered)) => {
+                    session_registered = registered;
+                }
+                Ok(Err(e)) => {
+                    writer_error = Some(e);
+                }
+                Err(_) => {
+                    writer_error = Some(crate::error::AppError::System(
+                        "Scan DB writer thread panicked".to_string(),
+                    ));
+                }
+            }
+        });
 
-            let dir_parent = current_dir.parent().map(|p| p.to_string_lossy().to_string());
-            let dir_name = current_dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| current_dir.to_string_lossy().to_string());
-            let is_dir_hidden = dir_name.starts_with('.');
+        if let Some(err) = writer_error {
+            return Err(err);
+        }
 
-            dir_map.insert(current_dir.to_string_lossy().to_string(), RawDirItem {
-                path: current_dir.to_string_lossy().to_string(),
-                name: dir_name,
-                parent_path: dir_parent,
-                file_count: dir_file_count,
-                dir_count: dir_subdirs,
-                total_size_bytes: dir_total_bytes,
-                created_at: dir_created,
-                modified_at: dir_modified,
-                is_hidden: is_dir_hidden,
-                is_system: false,
-            });
+        let files_scanned = files_atom.load(Ordering::Relaxed);
+        let dirs_scanned = dirs_atom.load(Ordering::Relaxed);
+        let bytes_scanned = bytes_atom.load(Ordering::Relaxed);
+        let error_count = errors_atom.load(Ordering::Relaxed);
 
-            // Update in-memory progress and emit throttled event
-            Self::emit_progress_if_needed(
+        let mut file_batch: Vec<RawFileItem> = Vec::new();
+        let mut error_batch: Vec<RawErrorItem> = Vec::new();
+
+        if status.load(Ordering::SeqCst) == STATUS_CANCELLED {
+            return Self::finalize_cancelled_scan(
+                &db_pool,
                 &options,
-                &status,
+                &mut session_registered,
+                &mut dir_map,
+                &mut file_batch,
+                &mut error_batch,
                 files_scanned,
                 dirs_scanned,
                 bytes_scanned,
                 error_count,
-                &current_dir,
-                current_file.as_deref(),
-                &recent_files,
                 start_time,
                 &progress,
                 &app_handle,
-                &mut last_emit,
-                false,
             );
         }
 
         Self::mark_session_registered(&db_pool, &options, &mut session_registered)?;
-
-        // Final flush of remaining file and error records
-        let mut empty_dir_batch = Vec::new();
-        Self::flush_batches(&db_pool, &options.session_id, &mut file_batch, &mut empty_dir_batch, &mut error_batch)?;
 
         // Perform bottom-up directory rollup so parent directories reflect true recursive size
         Self::rollup_and_flush_directories(&db_pool, &options.session_id, &mut dir_map, options.batch_size, &options.root_path)?;
@@ -883,8 +1042,22 @@ impl ScanEngine {
             error_count,
         )?;
 
-        if let Err(err) = db_pool.checkpoint_wal() {
-            warn!("Post-scan WAL checkpoint failed: {}", err);
+        // Prune superseded raw file/directory rows from prior scans of this drive
+        // (preserving lightweight scan_sessions, category_summaries, and storage_snapshots)
+        // and reclaim freed SQLite pages + truncate the WAL file.
+        match db_pool.prune_superseded_scans_and_reclaim(Some(&options.drive_id), false, false) {
+            Ok((pruned, reclaimed)) => {
+                if pruned > 0 || reclaimed > 0 {
+                    info!(
+                        "Post-scan retention pruned {} superseded session tree(s) on '{}' and reclaimed {} bytes",
+                        pruned, options.drive_id, reclaimed
+                    );
+                }
+            }
+            Err(err) => {
+                warn!("Post-scan retention/reclaim failed: {}", err);
+                let _ = db_pool.checkpoint_wal();
+            }
         }
 
         let final_summary = ScanSummary {
@@ -1363,6 +1536,8 @@ impl ScanEngine {
                 || path_str.contains("/.fseventsd")
                 || path_str.contains("/.DocumentRevisions-V100")
                 || path_str.contains("/.PKInstallSandboxManager")
+                || path_str.contains("/.timemachine")
+                || path_str.contains("/.MobileBackups")
             {
                 return true;
             }
@@ -1440,21 +1615,6 @@ impl ScanEngine {
             }
         }
         false
-    }
-
-    fn get_allocated_bytes(meta: &fs::Metadata) -> Option<u64> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            Some(meta.blocks() * 512)
-        }
-        #[cfg(not(unix))]
-        {
-            // On Windows align to 4096 byte cluster boundary
-            let len = meta.len();
-            let cluster_size = 4096;
-            Some(((len + cluster_size - 1) / cluster_size) * cluster_size)
-        }
     }
 
     fn get_timestamps(meta: &fs::Metadata) -> (Option<i64>, Option<i64>) {

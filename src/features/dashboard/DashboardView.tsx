@@ -25,11 +25,12 @@ import {
   RefreshCw,
   FileText,
   Activity,
+  Zap,
 } from 'lucide-react';
 
 export const DashboardView: React.FC = () => {
   const { drives, systemInfo, dbHealth, fetchDrives } = useDriveStore();
-  const { setActiveTab } = useUIStore();
+  const { setActiveTab, setRequestedCleanupTab } = useUIStore();
   const { isScanning, isPaused, progress, pauseScan, resumeScan, cancelScan, openScanModal } = useScanStore();
   const { analyticsData, fetchAnalytics, isLoadingAnalytics } = useVisualizationStore();
 
@@ -126,6 +127,17 @@ export const DashboardView: React.FC = () => {
             }}
           >
             Refresh
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            icon={<Zap className="w-3.5 h-3.5 text-accent" />}
+            onClick={() => {
+              setRequestedCleanupTab('quick_sweep');
+              setActiveTab('cleanup');
+            }}
+          >
+            Quick Cache Sweep
           </Button>
           <Button
             variant="secondary"

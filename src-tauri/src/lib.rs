@@ -15,6 +15,7 @@ use crate::commands::{
         find_duplicates, get_forgotten_files, get_hidden_files, get_large_files,
         get_unknown_storage,
     },
+    applications::inspect_installed_applications,
     classification::{
         add_category_override, classify_session, delete_category_override, get_category_files,
         get_category_overrides, get_storage_analysis,
@@ -30,7 +31,10 @@ use crate::commands::{
     scanner::{cancel_scan, get_scan_files, get_scan_progress, pause_scan, resume_scan, start_scan},
     system::get_system_info,
     visualization::{get_hierarchical_tree, get_storage_analytics},
-    cleanup::{get_cleanup_plan, execute_cleanup, get_cleanup_audit_history},
+    cleanup::{
+        execute_cleanup, execute_direct_cleanup, get_cleanup_audit_history, get_cleanup_plan,
+        run_quick_sweep,
+    },
 };
 use crate::services::scanner::ScanManager;
 use crate::storage::{migrator::Migrator, DbPool};
@@ -137,7 +141,10 @@ pub fn run() {
             get_storage_analytics,
             get_cleanup_plan,
             execute_cleanup,
+            execute_direct_cleanup,
+            run_quick_sweep,
             get_cleanup_audit_history,
+            inspect_installed_applications,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DiskAtlas desktop application");

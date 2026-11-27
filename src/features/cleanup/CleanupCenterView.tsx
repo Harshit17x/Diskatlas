@@ -5,10 +5,16 @@ import { Badge } from '../../components/common/Badge';
 import { Tabs } from '../../components/common/Tabs';
 import { DataTable } from '../../components/common/DataTable';
 import type { ColumnDef } from '@tanstack/react-table';
-import type { ForgottenFileItem, CleanupAuditRecord, CleanupItemCandidate } from '../../types/bindings';
+import type {
+  ForgottenFileItem,
+  CleanupAuditRecord,
+  CleanupItemCandidate,
+  QuickSweepItem,
+} from '../../types/bindings';
 import { useCleanupStore } from '../../stores/cleanupStore';
 import { useAdvancedAnalysisStore } from '../../stores/advancedAnalysisStore';
 import { useHistoryStore } from '../../stores/historyStore';
+import { useUIStore } from '../../stores/uiStore';
 import { formatBytes } from '../../utils/formatters';
 import { CleanupConfirmationModal } from '../../components/cleanup/CleanupConfirmationModal';
 import { CleanupResultsBanner } from '../../components/cleanup/CleanupResultsBanner';
@@ -32,10 +38,14 @@ import {
   CheckSquare,
   Square,
   Lock,
+  Zap,
 } from 'lucide-react';
 
 export const CleanupCenterView: React.FC = () => {
-  const [activeTab, setActiveTab] = useState('plan');
+  const [activeTab, setActiveTab] = useState('quick_sweep');
+  const [sweepCategoryFilter, setSweepCategoryFilter] = useState<string>('all');
+  const [sweepSearch, setSweepSearch] = useState('');
+  const { requestedCleanupTab, setRequestedCleanupTab } = useUIStore();
 
   const {
     cleanupPlan,
@@ -45,6 +55,14 @@ export const CleanupCenterView: React.FC = () => {
     toggleCandidateSelection,
     selectAllSafe,
     deselectAll,
+    quickSweepReport,
+    loadingQuickSweep,
+    quickSweepSelectedIds,
+    runQuickSweep,
+    toggleQuickSweepSelection,
+    selectAllSafeQuickSweep,
+    deselectAllQuickSweep,
+    openDirectCleanupConfirmation,
     groupFilter,
     setGroupFilter,
     riskFilter,
@@ -71,11 +89,30 @@ export const CleanupCenterView: React.FC = () => {
   const { sessionsPage, fetchSessions } = useHistoryStore();
 
   useEffect(() => {
+    if (requestedCleanupTab) {
+      setActiveTab(requestedCleanupTab);
+      setRequestedCleanupTab(null);
+    }
+  }, [requestedCleanupTab, setRequestedCleanupTab]);
+
+  useEffect(() => {
     fetchSessions(1, 20);
     fetchAuditHistory(1);
     fetchForgottenFiles();
     fetchCleanupPlan(selectedSessionId);
-  }, [fetchSessions, fetchAuditHistory, fetchForgottenFiles, fetchCleanupPlan, selectedSessionId]);
+    if (!quickSweepReport && !loadingQuickSweep) {
+      runQuickSweep();
+    }
+  }, [
+    fetchSessions,
+    fetchAuditHistory,
+    fetchForgottenFiles,
+    fetchCleanupPlan,
+    selectedSessionId,
+    quickSweepReport,
+    loadingQuickSweep,
+    runQuickSweep,
+  ]);
 
   const handleSessionChange = (sid: string) => {
     const nextSid = sid || null;
@@ -208,6 +245,61 @@ export const CleanupCenterView: React.FC = () => {
     },
   ];
 
+  const filteredQuickSweepItems = useMemo(() => {
+    if (!quickSweepReport) return [];
+    return quickSweepReport.items.filter((item) => {
+      if (sweepCategoryFilter !== 'all' && item.sweepGroup !== sweepCategoryFilter) return false;
+      if (sweepSearch.trim()) {
+        const q = sweepSearch.toLowerCase();
+        return (
+          item.name.toLowerCase().includes(q) ||
+          item.path.toLowerCase().includes(q) ||
+          item.groupLabel.toLowerCase().includes(q)
+        );
+      }
+      return true;
+    });
+  }, [quickSweepReport, sweepCategoryFilter, sweepSearch]);
+
+  const selectedQuickSweepItems = useMemo(() => {
+    if (!quickSweepReport) return [];
+    return quickSweepReport.items.filter((i) => quickSweepSelectedIds.has(i.id));
+  }, [quickSweepReport, quickSweepSelectedIds]);
+
+  const selectedQuickSweepBytes = useMemo(() => {
+    return selectedQuickSweepItems.reduce((acc, i) => acc + i.sizeBytes, 0);
+  }, [selectedQuickSweepItems]);
+
+  const handleConfirmQuickSweepCleanup = () => {
+    if (selectedQuickSweepItems.length === 0) return;
+    const candidates: CleanupItemCandidate[] = selectedQuickSweepItems.map((item: QuickSweepItem) => ({
+      id: item.id,
+      path: item.path,
+      name: item.name,
+      sizeBytes: item.sizeBytes,
+      category: item.category,
+      group: item.recGroup,
+      riskLevel: item.riskLevel,
+      reason: item.reason,
+      confidence: 0.95,
+      recoverableBytes: item.sizeBytes,
+      expectedConsequences: item.expectedConsequences,
+      recommendedAction: item.recommendedAction,
+      isCloudSynced: item.isCloudSynced,
+      cloudWarning: item.cloudWarning,
+      isBlocked: item.isBlocked,
+      blockReason: item.blockReason,
+      selected: true,
+      existsOnDisk: item.existsOnDisk,
+    }));
+    openDirectCleanupConfirmation({
+      title: 'Confirm Quick Sweep Cleanup',
+      sessionId: selectedSessionId,
+      items: candidates,
+      source: 'quick_sweep',
+    });
+  };
+
   // Audit table columns
   const auditColumns: ColumnDef<CleanupAuditRecord>[] = [
     {
@@ -332,6 +424,18 @@ export const CleanupCenterView: React.FC = () => {
           </select>
 
           <Button
+            variant="primary"
+            size="sm"
+            onClick={() => {
+              setActiveTab('quick_sweep');
+              runQuickSweep();
+            }}
+            disabled={loadingQuickSweep}
+            icon={<Zap className={`w-3.5 h-3.5 ${loadingQuickSweep ? 'animate-pulse' : ''}`} />}
+          >
+            {loadingQuickSweep ? 'Sweeping...' : 'Quick Sweep'}
+          </Button>
+          <Button
             variant="ghost"
             size="sm"
             onClick={() => {
@@ -351,13 +455,219 @@ export const CleanupCenterView: React.FC = () => {
       {/* 2. Primary Tabs */}
       <Tabs
         tabs={[
-          { id: 'plan', label: 'Cleanup Plan & Recommendations', count: cleanupPlan?.totalItems },
-          { id: 'audit', label: 'Cleanup Audit History', count: auditTotalItems },
-          { id: 'forgotten', label: 'Forgotten Files Heuristics', count: forgottenFiles?.totalItems },
+          { id: 'quick_sweep', label: 'Quick Sweep (Fast Caches)', count: quickSweepReport?.totalItems },
+          { id: 'plan', label: 'Scan Cleanup Plan', count: cleanupPlan?.totalItems },
+          { id: 'audit', label: 'Audit History', count: auditTotalItems },
+          { id: 'forgotten', label: 'Forgotten Files', count: forgottenFiles?.totalItems },
         ]}
         activeTab={activeTab}
         onChange={setActiveTab}
       />
+
+      {/* TAB 0: MOLE-STYLE FAST QUICK SWEEP (Read-only discovery; asks permission before delete) */}
+      {activeTab === 'quick_sweep' && (
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <Card className="p-3">
+              <span className="text-[11px] text-secondary uppercase font-mono">Reclaimable Found</span>
+              <div className="text-base font-bold text-primary mt-1">
+                {quickSweepReport ? formatBytes(quickSweepReport.totalBytes) : '—'}
+              </div>
+              <div className="text-[11px] text-muted font-mono mt-0.5">
+                {quickSweepReport ? `Swept in ${(quickSweepReport.durationMillis / 1000).toFixed(2)}s` : 'Read-only scan'}
+              </div>
+            </Card>
+            <Card className="p-3">
+              <span className="text-[11px] text-secondary uppercase font-mono">Safe Caches &amp; Logs</span>
+              <div className="text-base font-bold text-success mt-1">
+                {quickSweepReport ? formatBytes(quickSweepReport.safeBytes) : '—'}
+              </div>
+              <div className="text-[11px] text-muted mt-0.5">Regenerable caches</div>
+            </Card>
+            <Card className="p-3">
+              <span className="text-[11px] text-secondary uppercase font-mono">Review Suggested</span>
+              <div className="text-base font-bold text-warning mt-1">
+                {quickSweepReport ? formatBytes(quickSweepReport.reviewBytes) : '—'}
+              </div>
+              <div className="text-[11px] text-muted mt-0.5">Installers, leftovers &amp; repos</div>
+            </Card>
+            <Card className="p-3 border-accent/40 bg-accent/5">
+              <span className="text-[11px] text-accent uppercase font-mono">Selected to Trash</span>
+              <div className="text-base font-bold text-accent mt-1">
+                {selectedQuickSweepItems.length} items
+              </div>
+              <div className="text-[11px] text-accent/80 font-mono mt-0.5">
+                {formatBytes(selectedQuickSweepBytes)}
+              </div>
+            </Card>
+          </div>
+
+          <Card className="p-3 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="relative flex-1 max-w-sm">
+                <Search className="w-3.5 h-3.5 text-muted absolute left-2.5 top-2.5" />
+                <input
+                  type="text"
+                  placeholder="Filter caches, build outputs, downloads..."
+                  value={sweepSearch}
+                  onChange={(e) => setSweepSearch(e.target.value)}
+                  className="w-full bg-elevated border border-border rounded pl-8 pr-3 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={selectAllSafeQuickSweep}
+                  icon={<CheckSquare className="w-3.5 h-3.5 text-success" />}
+                >
+                  Select All Safe
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={deselectAllQuickSweep}
+                  icon={<Square className="w-3.5 h-3.5" />}
+                >
+                  Deselect All
+                </Button>
+              </div>
+            </div>
+
+            {quickSweepReport && (
+              <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-border/40 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setSweepCategoryFilter('all')}
+                  className={`px-2 py-0.5 rounded transition-colors ${
+                    sweepCategoryFilter === 'all'
+                      ? 'bg-accent text-white font-medium'
+                      : 'bg-elevated text-secondary hover:text-primary'
+                  }`}
+                >
+                  All ({quickSweepReport.totalItems})
+                </button>
+                {quickSweepReport.categoryTotals.map((cat) => (
+                  <button
+                    key={cat.sweepGroup}
+                    type="button"
+                    onClick={() => setSweepCategoryFilter(cat.sweepGroup)}
+                    className={`px-2 py-0.5 rounded transition-colors ${
+                      sweepCategoryFilter === cat.sweepGroup
+                        ? 'bg-accent text-white font-medium'
+                        : 'bg-elevated text-secondary hover:text-primary'
+                    }`}
+                  >
+                    {cat.label} ({cat.itemCount} • {formatBytes(cat.totalBytes)})
+                  </button>
+                ))}
+              </div>
+            )}
+          </Card>
+
+          {loadingQuickSweep ? (
+            <Card className="p-8 text-center text-secondary text-xs space-y-2">
+              <Zap className="w-5 h-5 text-accent animate-pulse mx-auto" />
+              <div>Running parallel cache, developer build, browser cache &amp; leftover sweep...</div>
+            </Card>
+          ) : filteredQuickSweepItems.length === 0 ? (
+            <Card className="p-8 text-center text-secondary text-xs">
+              No reclaimable cache or junk items found matching your filter.
+            </Card>
+          ) : (
+            <div className="space-y-2">
+              {filteredQuickSweepItems.map((item) => {
+                const isSelected = quickSweepSelectedIds.has(item.id);
+                return (
+                  <Card
+                    key={item.id}
+                    className={`p-3.5 transition-all border ${
+                      item.isBlocked
+                        ? 'opacity-65 border-border bg-elevated/40'
+                        : isSelected
+                        ? 'border-accent/40 bg-elevated/80'
+                        : 'border-border bg-panel hover:bg-elevated/40'
+                    }`}
+                  >
+                    <div className="flex items-start gap-3">
+                      <div className="pt-0.5">
+                        {item.isBlocked ? (
+                          <Lock className="w-4 h-4 text-muted shrink-0" />
+                        ) : (
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleQuickSweepSelection(item.id)}
+                            className="w-4 h-4 rounded border-border text-accent focus:ring-0 focus:outline-none cursor-pointer"
+                          />
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0 space-y-1">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 truncate">
+                            <span className="font-semibold text-primary text-xs truncate">
+                              {item.name}
+                            </span>
+                            <Badge variant="neutral" size="sm">
+                              {item.groupLabel}
+                            </Badge>
+                            {getRiskBadge(item.riskLevel)}
+                            {item.ageDays > 0 && (
+                              <span className="text-[10px] font-mono text-muted">
+                                {item.ageDays}d old
+                              </span>
+                            )}
+                          </div>
+                          <span className="font-mono text-xs font-semibold text-accent shrink-0">
+                            {formatBytes(item.sizeBytes)}
+                          </span>
+                        </div>
+                        <div className="font-mono text-[11px] text-secondary truncate" title={item.path}>
+                          {item.path}
+                        </div>
+                        <div className="text-[11px] text-secondary flex items-start gap-1.5">
+                          <Info className="w-3.5 h-3.5 text-muted shrink-0 mt-0.5" />
+                          <span>
+                            {item.reason} — <span className="text-muted">{item.expectedConsequences}</span>
+                          </span>
+                        </div>
+                        {item.isCloudSynced && item.cloudWarning && (
+                          <div className="p-2 bg-warning/10 border border-warning/20 rounded text-[11px] text-warning flex items-start gap-1.5">
+                            <CloudOff className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                            <span>{item.cloudWarning}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </Card>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="sticky bottom-0 p-3 bg-panel/95 backdrop-blur-md border border-border rounded-lg flex items-center justify-between z-20 px-4 shadow-lg">
+            <div className="flex items-center gap-4 text-xs">
+              <span className="text-secondary">
+                Selected:{' '}
+                <strong className="text-primary font-mono">{selectedQuickSweepItems.length}</strong> items
+              </span>
+              <span className="text-secondary">
+                Reclaimable:{' '}
+                <strong className="text-accent font-mono">{formatBytes(selectedQuickSweepBytes)}</strong>
+              </span>
+            </div>
+            <Button
+              variant="danger"
+              size="md"
+              onClick={handleConfirmQuickSweepCleanup}
+              disabled={selectedQuickSweepItems.length === 0}
+              icon={<Trash2 className="w-4 h-4" />}
+            >
+              Review &amp; Ask Permission to Clean ({selectedQuickSweepItems.length})
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* TAB 1: CLEANUP PLAN */}
       {activeTab === 'plan' && (

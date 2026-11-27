@@ -64,6 +64,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0011_normalize_summaries_and_indexes",
         sql: include_str!("../../migrations/0011_normalize_summaries_and_indexes.sql"),
     },
+    Migration {
+        version: 12,
+        name: "0012_compact_indexes_and_retention",
+        sql: include_str!("../../migrations/0012_compact_indexes_and_retention.sql"),
+    },
 ];
 
 pub struct Migrator;
@@ -171,6 +176,12 @@ impl Migrator {
                     [],
                 )?;
             }
+            12 => {
+                tx.execute(
+                    "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('maintenance:compact_pending', '1')",
+                    [],
+                )?;
+            }
             _ => {}
         }
         Ok(())
@@ -212,7 +223,7 @@ mod tests {
     fn test_migrations_apply_cleanly_on_empty_db() {
         let mut conn = Connection::open_in_memory().unwrap();
         let version = Migrator::run(&mut conn).unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
 
         // Verify tables were created
         let tables_count: i64 = conn
@@ -277,7 +288,7 @@ mod tests {
         .unwrap();
 
         let version = Migrator::run(&mut conn).unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
 
         let flag = |k: &str| -> String {
             conn.query_row("SELECT value FROM app_settings WHERE key = ?1", [k], |r| r.get(0))
@@ -286,6 +297,7 @@ mod tests {
         assert_eq!(flag("maintenance:dirs_unique_pending"), "1");
         assert_eq!(flag("maintenance:orphans_pending"), "1");
         assert_eq!(flag("maintenance:summaries_pending"), "1");
+        assert_eq!(flag("maintenance:compact_pending"), "1");
 
         let unique_dir_idx_exists: bool = conn
             .query_row(

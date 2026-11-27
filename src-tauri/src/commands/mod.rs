@@ -1,5 +1,7 @@
 pub mod analysis;
+pub mod applications;
 pub mod classification;
+pub mod cleanup;
 pub mod database;
 pub mod developer;
 pub mod drives;
@@ -8,4 +10,3 @@ pub mod intelligence;
 pub mod scanner;
 pub mod system;
 pub mod visualization;
-pub mod cleanup;

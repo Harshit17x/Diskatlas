@@ -1,4 +1,5 @@
 pub mod engine;
+pub mod fast_walker;
 pub mod manager;
 pub mod models;
 
@@ -460,6 +461,129 @@ mod tests {
             .get_files(Some(&session_id), 1, 10, None, Some("size".into()), Some(true), &db_pool)
             .unwrap();
         assert_eq!(page.total_count, summary.total_files);
+
+        let _ = fs::remove_dir_all(&temp_base);
+    }
+
+    #[test]
+    fn test_repeated_scans_prune_prior_raw_rows_and_preserve_history() {
+        use std::sync::atomic::Ordering;
+        use crate::services::scanner::engine::STATUS_CANCELLED;
+
+        let test_run_id = Uuid::new_v4().to_string();
+        let temp_base = std::env::temp_dir().join(format!("diskatlas_repeat_{}", test_run_id));
+        let root = temp_base.join("tree");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        File::create(root.join("one.txt")).unwrap().write_all(b"11111").unwrap();
+        File::create(root.join("sub/two.log")).unwrap().write_all(b"22222").unwrap();
+
+        let db_path = temp_base.join("repeat.db");
+        let db_pool = DbPool::new(&db_path).unwrap();
+        {
+            let mut conn = db_pool.lock_conn();
+            Migrator::run(&mut conn).unwrap();
+            conn.execute(
+                "INSERT INTO drives (id, label, mount_point, filesystem, total_bytes, available_bytes)
+                 VALUES ('TEST_REPEAT', 'Repeat Drive', '/tmp', 'apfs', 1000000, 500000)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let make_opts = |sid: &str| ScanOptions {
+            session_id: sid.to_string(),
+            drive_id: "TEST_REPEAT".to_string(),
+            root_path: root.clone(),
+            exclusions: vec![],
+            batch_size: 100,
+        };
+        let make_progress = |sid: &str| {
+            Arc::new(Mutex::new(ScanProgress {
+                session_id: sid.to_string(),
+                drive_id: "TEST_REPEAT".to_string(),
+                root_path: root.to_string_lossy().to_string(),
+                status: ScanStatus::Running,
+                files_scanned: 0,
+                dirs_scanned: 0,
+                bytes_scanned: 0,
+                error_count: 0,
+                current_path: root.to_string_lossy().to_string(),
+                current_file: None,
+                recent_files: Vec::new(),
+                elapsed_millis: 0,
+            }))
+        };
+
+        // Run scan #1 (completed)
+        let s1 = ScanEngine::run_scan(
+            make_opts("sess-1"),
+            Arc::new(AtomicU8::new(STATUS_RUNNING)),
+            Arc::new((Mutex::new(()), std::sync::Condvar::new())),
+            make_progress("sess-1"),
+            db_pool.clone(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(s1.status, ScanStatus::Completed);
+
+        // Ensure deterministic timestamp separation before scan #2
+        {
+            let conn = db_pool.lock_conn();
+            conn.execute(
+                "UPDATE scan_sessions SET started_at = '2026-11-26 10:00:00' WHERE id = 'sess-1'",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Run scan #2 (completed)
+        let s2 = ScanEngine::run_scan(
+            make_opts("sess-2"),
+            Arc::new(AtomicU8::new(STATUS_RUNNING)),
+            Arc::new((Mutex::new(()), std::sync::Condvar::new())),
+            make_progress("sess-2"),
+            db_pool.clone(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(s2.status, ScanStatus::Completed);
+
+        // Run scan #3 immediately cancelled while scan #2 exists
+        let cancel_status = Arc::new(AtomicU8::new(STATUS_CANCELLED));
+        cancel_status.store(STATUS_CANCELLED, Ordering::SeqCst);
+        let s3 = ScanEngine::run_scan(
+            make_opts("sess-3-cancel"),
+            cancel_status,
+            Arc::new((Mutex::new(()), std::sync::Condvar::new())),
+            make_progress("sess-3-cancel"),
+            db_pool.clone(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(s3.status, ScanStatus::Cancelled);
+
+        let conn = db_pool.lock_conn();
+        let sess1_files: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files WHERE session_id = 'sess-1'", [], |r| r.get(0))
+            .unwrap();
+        let sess2_files: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files WHERE session_id = 'sess-2'", [], |r| r.get(0))
+            .unwrap();
+        let sess3_files: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files WHERE session_id = 'sess-3-cancel'", [], |r| r.get(0))
+            .unwrap();
+        let sess1_cats: i64 = conn
+            .query_row("SELECT COUNT(*) FROM category_summaries WHERE session_id = 'sess-1'", [], |r| r.get(0))
+            .unwrap();
+        let snaps_total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM storage_snapshots WHERE drive_id = 'TEST_REPEAT'", [], |r| r.get(0))
+            .unwrap();
+
+        assert_eq!(sess1_files, 0, "Superseded completed scan #1 raw files must be pruned");
+        assert!(sess2_files >= 2, "Latest completed scan #2 must keep all browsable files");
+        assert_eq!(sess3_files, 0, "Cancelled scan #3 must not leave raw rows behind");
+        assert!(sess1_cats >= 1, "Historical category summaries for scan #1 must remain");
+        assert_eq!(snaps_total, 2, "Both completed scans must keep snapshot points");
 
         let _ = fs::remove_dir_all(&temp_base);
     }

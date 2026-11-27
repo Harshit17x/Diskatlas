@@ -3,12 +3,23 @@ import { safeInvoke } from '../utils/tauri';
 import { resolvePreferredSessionId } from '../utils/session';
 import type {
   CleanupPlan,
+  CleanupItemCandidate,
   ExecuteCleanupRequest,
   ExecuteCleanupResponse,
+  ExecuteDirectCleanupRequest,
   CleanupAuditRecord,
   CleanupAuditQuery,
   CleanupAuditResponse,
+  QuickSweepReport,
 } from '../types/bindings';
+
+export interface PendingDirectCleanup {
+  title: string;
+  sessionId?: string | null;
+  items: CleanupItemCandidate[];
+  source: 'quick_sweep' | 'applications';
+  onSuccess?: () => void;
+}
 
 interface CleanupState {
   cleanupPlan: CleanupPlan | null;
@@ -19,6 +30,12 @@ interface CleanupState {
 
   // Selected candidate IDs for cleanup
   selectedIds: Set<string>;
+
+  // Mole-style Quick Sweep state (read-only discovery; deletes only with explicit permission)
+  quickSweepReport: QuickSweepReport | null;
+  loadingQuickSweep: boolean;
+  quickSweepSelectedIds: Set<string>;
+  pendingDirectCleanup: PendingDirectCleanup | null;
 
   // Filters
   groupFilter: 'all' | 'safe_to_review' | 'review_required' | 'system_protected';
@@ -42,12 +59,21 @@ interface CleanupState {
   toggleCandidateSelection: (id: string) => void;
   selectAllSafe: () => void;
   deselectAll: () => void;
+
+  runQuickSweep: () => Promise<void>;
+  toggleQuickSweepSelection: (id: string) => void;
+  selectAllSafeQuickSweep: () => void;
+  deselectAllQuickSweep: () => void;
+  openDirectCleanupConfirmation: (opts: PendingDirectCleanup) => void;
+  clearPendingDirectCleanup: () => void;
+
   setGroupFilter: (group: 'all' | 'safe_to_review' | 'review_required' | 'system_protected') => void;
   setRiskFilter: (risk: 'all' | 'none' | 'low' | 'moderate' | 'high' | 'critical') => void;
   setSearchQuery: (query: string) => void;
   setUseRecycleBin: (val: boolean) => void;
   setConfirmationModalOpen: (open: boolean) => void;
   executeCleanup: (confirmationPhrase: string) => Promise<boolean>;
+  executePendingDirectCleanup: (confirmationPhrase: string) => Promise<boolean>;
   fetchAuditHistory: (page?: number, status?: string) => Promise<void>;
   resetExecutionResponse: () => void;
 }
@@ -60,6 +86,11 @@ export const useCleanupStore = create<CleanupState>((set, get) => ({
   error: null,
 
   selectedIds: new Set<string>(),
+
+  quickSweepReport: null,
+  loadingQuickSweep: false,
+  quickSweepSelectedIds: new Set<string>(),
+  pendingDirectCleanup: null,
 
   groupFilter: 'all',
   riskFilter: 'all',
@@ -135,6 +166,68 @@ export const useCleanupStore = create<CleanupState>((set, get) => ({
     set({ selectedIds: new Set() });
   },
 
+  runQuickSweep: async () => {
+    set({ loadingQuickSweep: true, error: null });
+    const res = await safeInvoke<QuickSweepReport>('run_quick_sweep');
+    if (res.ok) {
+      const initialSelected = new Set<string>();
+      res.data.items.forEach((item) => {
+        if (item.selected && !item.isBlocked) {
+          initialSelected.add(item.id);
+        }
+      });
+      set({
+        quickSweepReport: res.data,
+        quickSweepSelectedIds: initialSelected,
+        loadingQuickSweep: false,
+      });
+    } else {
+      set({ loadingQuickSweep: false, error: res.error.message });
+    }
+  },
+
+  toggleQuickSweepSelection: (id: string) => {
+    const { quickSweepSelectedIds, quickSweepReport } = get();
+    if (!quickSweepReport) return;
+    const item = quickSweepReport.items.find((i) => i.id === id);
+    if (!item || item.isBlocked) return;
+    const next = new Set(quickSweepSelectedIds);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    set({ quickSweepSelectedIds: next });
+  },
+
+  selectAllSafeQuickSweep: () => {
+    const { quickSweepReport } = get();
+    if (!quickSweepReport) return;
+    const next = new Set<string>();
+    quickSweepReport.items.forEach((i) => {
+      if (!i.isBlocked && i.recGroup === 'safe_to_review' && !i.isCloudSynced) {
+        next.add(i.id);
+      }
+    });
+    set({ quickSweepSelectedIds: next });
+  },
+
+  deselectAllQuickSweep: () => {
+    set({ quickSweepSelectedIds: new Set() });
+  },
+
+  openDirectCleanupConfirmation: (opts: PendingDirectCleanup) => {
+    set({
+      pendingDirectCleanup: opts,
+      error: null,
+      confirmationModalOpen: true,
+    });
+  },
+
+  clearPendingDirectCleanup: () => {
+    set({ pendingDirectCleanup: null });
+  },
+
   setGroupFilter: (group) => set({ groupFilter: group }),
   setRiskFilter: (risk) => set({ riskFilter: risk }),
   setSearchQuery: (query) => set({ searchQuery: query }),
@@ -165,6 +258,56 @@ export const useCleanupStore = create<CleanupState>((set, get) => ({
       await fetchAuditHistory(1);
       await fetchCleanupPlan(cleanupPlan.sessionId);
       import('./driveStore').then(({ useDriveStore }) => {
+        useDriveStore.getState().fetchDbHealth();
+      });
+      return true;
+    }
+
+    set({
+      error: res.error.message,
+      executingCleanup: false,
+    });
+    return false;
+  },
+
+  executePendingDirectCleanup: async (confirmationPhrase: string) => {
+    const { pendingDirectCleanup, useRecycleBin, fetchAuditHistory, runQuickSweep } = get();
+    if (!pendingDirectCleanup || pendingDirectCleanup.items.length === 0) return false;
+
+    set({ executingCleanup: true, error: null });
+    const request: ExecuteDirectCleanupRequest = {
+      batchId: `direct-${Date.now()}`,
+      sessionId: pendingDirectCleanup.sessionId || resolvePreferredSessionId() || null,
+      items: pendingDirectCleanup.items.map((item) => ({
+        id: item.id,
+        path: item.path,
+        name: item.name,
+        sizeBytes: item.sizeBytes,
+        category: item.category,
+        riskLevel: item.riskLevel,
+      })),
+      useRecycleBin,
+      confirmationPhrase,
+    };
+
+    const res = await safeInvoke<ExecuteCleanupResponse>('execute_direct_cleanup', { request });
+    if (res.ok) {
+      const onSuccess = pendingDirectCleanup.onSuccess;
+      const source = pendingDirectCleanup.source;
+      set({
+        executionResponse: res.data,
+        executingCleanup: false,
+        confirmationModalOpen: false,
+        pendingDirectCleanup: null,
+      });
+
+      await fetchAuditHistory(1);
+      if (source === 'quick_sweep') {
+        await runQuickSweep();
+      }
+      onSuccess?.();
+      import('./driveStore').then(({ useDriveStore }) => {
+        useDriveStore.getState().fetchDrives();
         useDriveStore.getState().fetchDbHealth();
       });
       return true;

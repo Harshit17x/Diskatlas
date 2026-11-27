@@ -229,17 +229,21 @@ impl HistoryService {
         })
     }
 
-    /// Deletes a scan session and cascades deletion of files, directories, errors, and categories.
+    /// Deletes a scan session and cascades deletion of files, directories, errors, and categories,
+    /// then reclaims freed database pages via incremental vacuum + WAL truncate.
     pub fn delete_scan_session(db_pool: &DbPool, session_id: &str) -> Result<()> {
-        let conn = db_pool.lock_conn();
-        let deleted = conn.execute("DELETE FROM scan_sessions WHERE id = ?1", [session_id])?;
-        if deleted == 0 {
-            return Err(AppError::NotFound(format!("Session '{}' not found", session_id)));
+        {
+            let conn = db_pool.lock_conn();
+            let deleted = conn.execute("DELETE FROM scan_sessions WHERE id = ?1", [session_id])?;
+            if deleted == 0 {
+                return Err(AppError::NotFound(format!("Session '{}' not found", session_id)));
+            }
+            let _ = conn.execute(
+                "DELETE FROM app_settings WHERE key IN (?1, ?2)",
+                params![format!("dev_analyzed:{}", session_id), format!("intel_generated:{}", session_id)],
+            );
         }
-        let _ = conn.execute(
-            "DELETE FROM app_settings WHERE key IN (?1, ?2)",
-            params![format!("dev_analyzed:{}", session_id), format!("intel_generated:{}", session_id)],
-        );
+        let _ = db_pool.reclaim_free_pages(false);
         info!("Deleted scan session '{}' and all associated records", session_id);
         Ok(())
     }
@@ -434,176 +438,237 @@ impl HistoryService {
             category_deltas.push(c?);
         }
 
+        // Check whether both sessions retain raw file/directory trees (compacted historical
+        // sessions keep totals & category_summaries while pruning millions of raw rows).
+        let baseline_has_dirs: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM directories WHERE session_id = ?1 LIMIT 1)",
+                [baseline_session_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        let target_has_dirs: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM directories WHERE session_id = ?1 LIMIT 1)",
+                [target_session_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        let baseline_has_files: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM files WHERE session_id = ?1 LIMIT 1)",
+                [baseline_session_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        let target_has_files: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM files WHERE session_id = ?1 LIMIT 1)",
+                [target_session_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+
+        let can_diff_dirs =
+            (baseline_has_dirs || baseline.total_directories == 0)
+                && (target_has_dirs || target.total_directories == 0);
+        let can_diff_files =
+            (baseline_has_files || baseline.total_files == 0)
+                && (target_has_files || target.total_files == 0);
+
         // 2. Directory deltas (changes in largest directories)
-        let mut dir_stmt = conn.prepare(
-            "WITH all_dirs AS (
-                SELECT path FROM directories WHERE session_id = ?1
-                UNION
-                SELECT path FROM directories WHERE session_id = ?2
-             )
-             SELECT
-                c.path,
-                COALESCE(b.total_size_bytes, 0) as baseline_size,
-                COALESCE(t.total_size_bytes, 0) as target_size,
-                (COALESCE(t.total_size_bytes, 0) - COALESCE(b.total_size_bytes, 0)) as delta_bytes
-             FROM all_dirs c
-             LEFT JOIN directories b ON b.session_id = ?1 AND b.path = c.path
-             LEFT JOIN directories t ON t.session_id = ?2 AND t.path = c.path
-             WHERE COALESCE(b.total_size_bytes, 0) != COALESCE(t.total_size_bytes, 0)
-             ORDER BY ABS(delta_bytes) DESC
-             LIMIT 25;",
-        )?;
-
-        let dir_rows = dir_stmt.query_map(params![baseline_session_id, target_session_id], |row| {
-            Ok(DirectoryDeltaItem {
-                path: row.get(0)?,
-                baseline_size_bytes: row.get::<_, i64>(1)? as u64,
-                target_size_bytes: row.get::<_, i64>(2)? as u64,
-                delta_bytes: row.get(3)?,
-            })
-        })?;
-
         let mut directory_deltas = Vec::new();
-        for d in dir_rows {
-            directory_deltas.push(d?);
+        if can_diff_dirs {
+            let mut dir_stmt = conn.prepare(
+                "WITH all_dirs AS (
+                    SELECT path FROM directories WHERE session_id = ?1
+                    UNION
+                    SELECT path FROM directories WHERE session_id = ?2
+                 )
+                 SELECT
+                    c.path,
+                    COALESCE(b.total_size_bytes, 0) as baseline_size,
+                    COALESCE(t.total_size_bytes, 0) as target_size,
+                    (COALESCE(t.total_size_bytes, 0) - COALESCE(b.total_size_bytes, 0)) as delta_bytes
+                 FROM all_dirs c
+                 LEFT JOIN directories b ON b.session_id = ?1 AND b.path = c.path
+                 LEFT JOIN directories t ON t.session_id = ?2 AND t.path = c.path
+                 WHERE COALESCE(b.total_size_bytes, 0) != COALESCE(t.total_size_bytes, 0)
+                 ORDER BY ABS(delta_bytes) DESC
+                 LIMIT 25;",
+            )?;
+
+            let dir_rows = dir_stmt.query_map(params![baseline_session_id, target_session_id], |row| {
+                Ok(DirectoryDeltaItem {
+                    path: row.get(0)?,
+                    baseline_size_bytes: row.get::<_, i64>(1)? as u64,
+                    target_size_bytes: row.get::<_, i64>(2)? as u64,
+                    delta_bytes: row.get(3)?,
+                })
+            })?;
+
+            for d in dir_rows {
+                directory_deltas.push(d?);
+            }
         }
 
-        // 3. Newly discovered files (in target, not in baseline)
-        let added_files_count: u64 = conn.query_row(
-            "SELECT COUNT(*) FROM files t
-             WHERE t.session_id = ?2
-               AND NOT EXISTS (
-                   SELECT 1 FROM files b WHERE b.session_id = ?1 AND b.path = t.path
-               );",
-            params![baseline_session_id, target_session_id],
-            |r| r.get(0),
-        )?;
+        // 3–5. File-level differential queries (only when raw file trees exist for both sessions)
+        let (
+            added_files_count,
+            removed_files_count,
+            modified_files_count,
+            added_files_sample,
+            removed_files_sample,
+            modified_files_sample,
+        ) = if can_diff_files {
+            // 3. Newly discovered files (in target, not in baseline)
+            let added_files_count: u64 = conn.query_row(
+                "SELECT COUNT(*) FROM files t
+                 WHERE t.session_id = ?2
+                   AND NOT EXISTS (
+                       SELECT 1 FROM files b WHERE b.session_id = ?1 AND b.path = t.path
+                   );",
+                params![baseline_session_id, target_session_id],
+                |r| r.get(0),
+            )?;
 
-        let mut added_stmt = conn.prepare(
-            "SELECT t.id, t.session_id, t.path, t.name, t.extension, t.parent_path,
-                    t.size_bytes, t.allocated_bytes, t.created_at, t.modified_at,
-                    t.is_hidden, t.is_system, t.is_symlink
-             FROM files t
-             WHERE t.session_id = ?2
-               AND NOT EXISTS (
-                   SELECT 1 FROM files b WHERE b.session_id = ?1 AND b.path = t.path
-               )
-             ORDER BY t.size_bytes DESC
-             LIMIT 50;",
-        )?;
+            let mut added_stmt = conn.prepare(
+                "SELECT t.id, t.session_id, t.path, t.name, t.extension, t.parent_path,
+                        t.size_bytes, t.allocated_bytes, t.created_at, t.modified_at,
+                        t.is_hidden, t.is_system, t.is_symlink
+                 FROM files t
+                 WHERE t.session_id = ?2
+                   AND NOT EXISTS (
+                       SELECT 1 FROM files b WHERE b.session_id = ?1 AND b.path = t.path
+                   )
+                 ORDER BY t.size_bytes DESC
+                 LIMIT 50;",
+            )?;
 
-        let added_rows = added_stmt.query_map(params![baseline_session_id, target_session_id], |row| {
-            Ok(ScanFileItem {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                path: row.get(2)?,
-                name: row.get(3)?,
-                extension: row.get(4)?,
-                parent_path: row.get(5)?,
-                size_bytes: row.get::<_, i64>(6)? as u64,
-                allocated_bytes: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
-                created_at: row.get(8)?,
-                modified_at: row.get(9)?,
-                is_hidden: row.get::<_, i64>(10)? != 0,
-                is_system: row.get::<_, i64>(11)? != 0,
-                is_symlink: row.get::<_, i64>(12)? != 0,
-            })
-        })?;
+            let added_rows = added_stmt.query_map(params![baseline_session_id, target_session_id], |row| {
+                Ok(ScanFileItem {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    path: row.get(2)?,
+                    name: row.get(3)?,
+                    extension: row.get(4)?,
+                    parent_path: row.get(5)?,
+                    size_bytes: row.get::<_, i64>(6)? as u64,
+                    allocated_bytes: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+                    created_at: row.get(8)?,
+                    modified_at: row.get(9)?,
+                    is_hidden: row.get::<_, i64>(10)? != 0,
+                    is_system: row.get::<_, i64>(11)? != 0,
+                    is_symlink: row.get::<_, i64>(12)? != 0,
+                })
+            })?;
 
-        let mut added_files_sample = Vec::new();
-        for a in added_rows {
-            added_files_sample.push(a?);
-        }
+            let mut added_files_sample = Vec::new();
+            for a in added_rows {
+                added_files_sample.push(a?);
+            }
 
-        // 4. Removed files (in baseline, not in target)
-        let removed_files_count: u64 = conn.query_row(
-            "SELECT COUNT(*) FROM files b
-             WHERE b.session_id = ?1
-               AND NOT EXISTS (
-                   SELECT 1 FROM files t WHERE t.session_id = ?2 AND t.path = b.path
-               );",
-            params![baseline_session_id, target_session_id],
-            |r| r.get(0),
-        )?;
+            // 4. Removed files (in baseline, not in target)
+            let removed_files_count: u64 = conn.query_row(
+                "SELECT COUNT(*) FROM files b
+                 WHERE b.session_id = ?1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM files t WHERE t.session_id = ?2 AND t.path = b.path
+                   );",
+                params![baseline_session_id, target_session_id],
+                |r| r.get(0),
+            )?;
 
-        let mut removed_stmt = conn.prepare(
-            "SELECT b.id, b.session_id, b.path, b.name, b.extension, b.parent_path,
-                    b.size_bytes, b.allocated_bytes, b.created_at, b.modified_at,
-                    b.is_hidden, b.is_system, b.is_symlink
-             FROM files b
-             WHERE b.session_id = ?1
-               AND NOT EXISTS (
-                   SELECT 1 FROM files t WHERE t.session_id = ?2 AND t.path = b.path
-               )
-             ORDER BY b.size_bytes DESC
-             LIMIT 50;",
-        )?;
+            let mut removed_stmt = conn.prepare(
+                "SELECT b.id, b.session_id, b.path, b.name, b.extension, b.parent_path,
+                        b.size_bytes, b.allocated_bytes, b.created_at, b.modified_at,
+                        b.is_hidden, b.is_system, b.is_symlink
+                 FROM files b
+                 WHERE b.session_id = ?1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM files t WHERE t.session_id = ?2 AND t.path = b.path
+                   )
+                 ORDER BY b.size_bytes DESC
+                 LIMIT 50;",
+            )?;
 
-        let removed_rows = removed_stmt.query_map(params![baseline_session_id, target_session_id], |row| {
-            Ok(ScanFileItem {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                path: row.get(2)?,
-                name: row.get(3)?,
-                extension: row.get(4)?,
-                parent_path: row.get(5)?,
-                size_bytes: row.get::<_, i64>(6)? as u64,
-                allocated_bytes: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
-                created_at: row.get(8)?,
-                modified_at: row.get(9)?,
-                is_hidden: row.get::<_, i64>(10)? != 0,
-                is_system: row.get::<_, i64>(11)? != 0,
-                is_symlink: row.get::<_, i64>(12)? != 0,
-            })
-        })?;
+            let removed_rows = removed_stmt.query_map(params![baseline_session_id, target_session_id], |row| {
+                Ok(ScanFileItem {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    path: row.get(2)?,
+                    name: row.get(3)?,
+                    extension: row.get(4)?,
+                    parent_path: row.get(5)?,
+                    size_bytes: row.get::<_, i64>(6)? as u64,
+                    allocated_bytes: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+                    created_at: row.get(8)?,
+                    modified_at: row.get(9)?,
+                    is_hidden: row.get::<_, i64>(10)? != 0,
+                    is_system: row.get::<_, i64>(11)? != 0,
+                    is_symlink: row.get::<_, i64>(12)? != 0,
+                })
+            })?;
 
-        let mut removed_files_sample = Vec::new();
-        for r in removed_rows {
-            removed_files_sample.push(r?);
-        }
+            let mut removed_files_sample = Vec::new();
+            for r in removed_rows {
+                removed_files_sample.push(r?);
+            }
 
-        // 5. Modified files (in both, different size or modification timestamp)
-        let modified_files_count: u64 = conn.query_row(
-            "SELECT COUNT(*)
-             FROM files b
-             JOIN files t ON b.path = t.path AND t.session_id = ?2
-             WHERE b.session_id = ?1
-               AND (b.size_bytes != t.size_bytes OR b.modified_at != t.modified_at);",
-            params![baseline_session_id, target_session_id],
-            |r| r.get(0),
-        )?;
+            // 5. Modified files (in both, different size or modification timestamp)
+            let modified_files_count: u64 = conn.query_row(
+                "SELECT COUNT(*)
+                 FROM files b
+                 JOIN files t ON b.path = t.path AND t.session_id = ?2
+                 WHERE b.session_id = ?1
+                   AND (b.size_bytes != t.size_bytes OR b.modified_at != t.modified_at);",
+                params![baseline_session_id, target_session_id],
+                |r| r.get(0),
+            )?;
 
-        let mut mod_stmt = conn.prepare(
-            "SELECT
-                t.path, t.name, t.extension,
-                b.size_bytes as baseline_size,
-                t.size_bytes as target_size,
-                (t.size_bytes - b.size_bytes) as size_delta,
-                t.modified_at
-             FROM files b
-             JOIN files t ON b.path = t.path AND t.session_id = ?2
-             WHERE b.session_id = ?1
-               AND (b.size_bytes != t.size_bytes OR b.modified_at != t.modified_at)
-             ORDER BY ABS(t.size_bytes - b.size_bytes) DESC
-             LIMIT 50;",
-        )?;
+            let mut mod_stmt = conn.prepare(
+                "SELECT
+                    t.path, t.name, t.extension,
+                    b.size_bytes as baseline_size,
+                    t.size_bytes as target_size,
+                    (t.size_bytes - b.size_bytes) as size_delta,
+                    t.modified_at
+                 FROM files b
+                 JOIN files t ON b.path = t.path AND t.session_id = ?2
+                 WHERE b.session_id = ?1
+                   AND (b.size_bytes != t.size_bytes OR b.modified_at != t.modified_at)
+                 ORDER BY ABS(t.size_bytes - b.size_bytes) DESC
+                 LIMIT 50;",
+            )?;
 
-        let mod_rows = mod_stmt.query_map(params![baseline_session_id, target_session_id], |row| {
-            Ok(FileModifiedItem {
-                path: row.get(0)?,
-                name: row.get(1)?,
-                extension: row.get(2)?,
-                baseline_size_bytes: row.get::<_, i64>(3)? as u64,
-                target_size_bytes: row.get::<_, i64>(4)? as u64,
-                size_delta_bytes: row.get(5)?,
-                modified_at: row.get(6)?,
-            })
-        })?;
+            let mod_rows = mod_stmt.query_map(params![baseline_session_id, target_session_id], |row| {
+                Ok(FileModifiedItem {
+                    path: row.get(0)?,
+                    name: row.get(1)?,
+                    extension: row.get(2)?,
+                    baseline_size_bytes: row.get::<_, i64>(3)? as u64,
+                    target_size_bytes: row.get::<_, i64>(4)? as u64,
+                    size_delta_bytes: row.get(5)?,
+                    modified_at: row.get(6)?,
+                })
+            })?;
 
-        let mut modified_files_sample = Vec::new();
-        for m in mod_rows {
-            modified_files_sample.push(m?);
-        }
+            let mut modified_files_sample = Vec::new();
+            for m in mod_rows {
+                modified_files_sample.push(m?);
+            }
+
+            (
+                added_files_count,
+                removed_files_count,
+                modified_files_count,
+                added_files_sample,
+                removed_files_sample,
+                modified_files_sample,
+            )
+        } else {
+            (0, 0, 0, Vec::new(), Vec::new(), Vec::new())
+        };
 
         Ok(ScanComparisonResult {
             baseline_session: baseline,

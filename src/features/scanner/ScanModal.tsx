@@ -380,8 +380,18 @@ export const ScanModal: React.FC = () => {
             <div className="flex items-center gap-2">
               <span className={`w-2 h-2 rounded-full ${isPaused ? 'bg-warning' : 'bg-success animate-pulse'}`} />
               <span className="font-medium text-primary">
-                {isPaused ? 'Scan Paused' : 'Traversing Filesystem...'}
+                {isPaused ? 'Scan Paused' : 'Parallel Traversal Active...'}
               </span>
+              {!isPaused && (progress?.elapsedMillis ?? 0) > 250 && (progress?.filesScanned ?? 0) > 0 && (
+                <Badge variant="accent" size="sm">
+                  {formatNumber(
+                    Math.round(
+                      ((progress?.filesScanned ?? 0) * 1000) / Math.max(progress?.elapsedMillis ?? 1, 1)
+                    )
+                  )}{' '}
+                  files/s
+                </Badge>
+              )}
             </div>
             <div className="flex items-center gap-2">
               <Clock className="w-3.5 h-3.5 text-muted" />

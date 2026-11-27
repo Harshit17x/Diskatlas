@@ -50,7 +50,7 @@ export const SettingsView: React.FC = () => {
       setDbStatusBanner({
         ok: res.data.ok,
         title: res.data.ok ? 'Integrity Check Passed' : 'Integrity Warnings Detected',
-        detail: `Schema v${res.data.migrationVersion} (${res.data.walMode}) — ${res.data.details.join(', ')}`,
+        detail: `${res.data.details.join(', ')} — DB ${formatBytes(res.data.dbSizeBytes)}, WAL ${formatBytes(res.data.walSizeBytes)}`,
       });
     } else {
       setDbStatusBanner({
@@ -68,9 +68,9 @@ export const SettingsView: React.FC = () => {
     if (res.ok) {
       await fetchDbHealth();
       setDbStatusBanner({
-        ok: true,
+        ok: res.data.ok,
         title: 'Database Compacted (VACUUM & WAL Checkpoint)',
-        detail: `${res.data.message} (${formatBytes(res.data.dbSizeBeforeBytes)} -> ${formatBytes(res.data.dbSizeAfterBytes)})`,
+        detail: `${res.data.message} (${formatBytes(res.data.previousBytes)} -> ${formatBytes(res.data.currentBytes)})`,
       });
     } else {
       setDbStatusBanner({
@@ -233,7 +233,7 @@ export const SettingsView: React.FC = () => {
             </div>
           )}
 
-          <div className="pt-2 flex items-center gap-2">
+          <div className="pt-2 flex flex-wrap items-center gap-2">
             <Button
               variant="secondary"
               size="sm"
@@ -251,6 +251,9 @@ export const SettingsView: React.FC = () => {
               VACUUM Database
             </Button>
           </div>
+          <p className="text-[11px] text-secondary">
+            Automatic scan retention keeps full per-file indexes only for the latest completed scan per drive while preserving all historical summaries &amp; snapshots, and reclaims freed pages via SQLite incremental auto-vacuum.
+          </p>
         </Card>
       )}
 

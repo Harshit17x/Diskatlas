@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use rusqlite::params;
@@ -748,7 +748,7 @@ impl DeveloperService {
         (num * multiplier) as u64
     }
 
-    /// Inspects known global package manager and tooling caches on host disk.
+    /// Inspects known global package manager and tooling caches in parallel using `fast_walker`.
     pub fn inspect_global_caches() -> Vec<GlobalToolCacheItem> {
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
@@ -756,28 +756,31 @@ impl DeveloperService {
         let home_path = PathBuf::from(&home);
 
         #[cfg(target_os = "windows")]
-        let (pnpm_store, android_sdk) = (
+        let (pnpm_store, android_sdk, homebrew_cache) = (
             std::env::var("LOCALAPPDATA")
                 .map(|l| PathBuf::from(l).join("pnpm/store"))
                 .unwrap_or_else(|_| home_path.join("AppData/Local/pnpm/store")),
             std::env::var("LOCALAPPDATA")
                 .map(|l| PathBuf::from(l).join("Android/Sdk"))
                 .unwrap_or_else(|_| home_path.join("AppData/Local/Android/Sdk")),
+            None::<PathBuf>,
         );
 
         #[cfg(target_os = "macos")]
-        let (pnpm_store, android_sdk) = (
+        let (pnpm_store, android_sdk, homebrew_cache) = (
             home_path.join("Library/pnpm/store"),
             home_path.join("Library/Android/sdk"),
+            Some(home_path.join("Library/Caches/Homebrew")),
         );
 
         #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-        let (pnpm_store, android_sdk) = (
+        let (pnpm_store, android_sdk, homebrew_cache) = (
             home_path.join(".local/share/pnpm/store"),
             home_path.join("Android/Sdk"),
+            None::<PathBuf>,
         );
 
-        let targets = vec![
+        let mut targets = vec![
             ("Cargo Registry", home_path.join(".cargo/registry")),
             ("Cargo Git Caches", home_path.join(".cargo/git")),
             ("npm Global Cache", home_path.join(".npm")),
@@ -790,58 +793,40 @@ impl DeveloperService {
             ("Android SDK & Emulators", android_sdk),
             ("Xcode DerivedData", home_path.join("Library/Developer/Xcode/DerivedData")),
         ];
-
-        let mut items = Vec::new();
-
-        for (name, path) in targets {
-            let exists = path.exists();
-            let (size, count) = if exists {
-                Self::calculate_dir_size(&path)
-            } else {
-                (0, 0)
-            };
-
-            items.push(GlobalToolCacheItem {
-                tool: name.to_string(),
-                path: path.to_string_lossy().to_string(),
-                size_bytes: size,
-                file_count: count,
-                exists,
-            });
+        if let Some(hb) = homebrew_cache {
+            targets.push(("Homebrew Downloads Cache", hb));
         }
+
+        let items = std::thread::scope(|scope| {
+            let handles: Vec<_> = targets
+                .into_iter()
+                .map(|(name, path)| {
+                    scope.spawn(move || {
+                        let exists = path.exists();
+                        let (size_bytes, file_count) = if exists {
+                            let stats = crate::services::scanner::fast_walker::measure_dir_parallel(&path);
+                            (stats.size_bytes, stats.file_count)
+                        } else {
+                            (0, 0)
+                        };
+                        GlobalToolCacheItem {
+                            tool: name.to_string(),
+                            path: path.to_string_lossy().to_string(),
+                            size_bytes,
+                            file_count,
+                            exists,
+                        }
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .filter_map(|h| h.join().ok())
+                .collect::<Vec<_>>()
+        });
 
         items
-    }
-
-    fn calculate_dir_size(path: &Path) -> (u64, u64) {
-        let mut total_size: u64 = 0;
-        let mut file_count: u64 = 0;
-        let mut stack = vec![path.to_path_buf()];
-        let mut visited: usize = 0;
-
-        while let Some(current) = stack.pop() {
-            visited += 1;
-            if visited > 50_000 {
-                break;
-            }
-            if let Ok(entries) = std::fs::read_dir(&current) {
-                for entry in entries.flatten() {
-                    if let Ok(meta) = std::fs::symlink_metadata(entry.path()) {
-                        if meta.file_type().is_symlink() {
-                            continue;
-                        }
-                        if meta.is_file() {
-                            total_size += meta.len();
-                            file_count += 1;
-                        } else if meta.is_dir() {
-                            stack.push(entry.path());
-                        }
-                    }
-                }
-            }
-        }
-
-        (total_size, file_count)
     }
 }
 

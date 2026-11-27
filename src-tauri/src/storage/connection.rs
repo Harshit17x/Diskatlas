@@ -27,6 +27,15 @@ impl DbPool {
 
         let conn = Connection::open(path)?;
 
+        // Enable incremental auto-vacuum on newly initialized databases so pruned scan
+        // sessions return freed pages to the OS without requiring full-file VACUUM copies.
+        let initial_pages: i64 = conn
+            .query_row("PRAGMA page_count;", [], |r| r.get(0))
+            .unwrap_or(1);
+        if initial_pages == 0 {
+            let _ = conn.pragma_update(None, "auto_vacuum", "INCREMENTAL");
+        }
+
         // Configure SQLite performance, memory caching, and concurrency pragmas
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -167,7 +176,12 @@ impl DbPool {
 
         if !self.is_memory {
             let conn = self.lock_conn();
-            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+            conn.execute_batch(
+                "PRAGMA wal_checkpoint(TRUNCATE);
+                 PRAGMA auto_vacuum = INCREMENTAL;
+                 VACUUM;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )?;
         }
 
         let (curr_db, curr_wal) = self.file_sizes();
@@ -240,26 +254,24 @@ impl DbPool {
             return Ok(());
         }
 
-        let (needs_dirs_unique, needs_orphans, needs_summaries) = self.with_read_conn(|conn| {
-            let flag = |key: &str| -> bool {
-                conn.query_row(
-                    "SELECT value FROM app_settings WHERE key = ?1",
-                    [key],
-                    |r| r.get::<_, String>(0),
-                )
-                .map(|v| v == "1")
-                .unwrap_or(false)
-            };
-            Ok((
-                flag("maintenance:dirs_unique_pending"),
-                flag("maintenance:orphans_pending"),
-                flag("maintenance:summaries_pending"),
-            ))
-        })?;
-
-        if !needs_dirs_unique && !needs_orphans && !needs_summaries {
-            return Ok(());
-        }
+        let (needs_dirs_unique, needs_orphans, needs_summaries, needs_compact) =
+            self.with_read_conn(|conn| {
+                let flag = |key: &str| -> bool {
+                    conn.query_row(
+                        "SELECT value FROM app_settings WHERE key = ?1",
+                        [key],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .map(|v| v == "1")
+                    .unwrap_or(false)
+                };
+                Ok((
+                    flag("maintenance:dirs_unique_pending"),
+                    flag("maintenance:orphans_pending"),
+                    flag("maintenance:summaries_pending"),
+                    flag("maintenance:compact_pending"),
+                ))
+            })?;
 
         if needs_dirs_unique {
             // Inspect index and duplicate directory IDs on the read connection first so long-running
@@ -397,8 +409,295 @@ impl DbPool {
             );
         }
 
-        info!("Deferred database startup maintenance complete");
+        if needs_compact {
+            let conn = self.lock_conn();
+            info!("Dropping redundant/unused SQLite indexes to shrink per-scan database footprint...");
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS idx_dirs_session_path;
+                 DROP INDEX IF EXISTS idx_files_session_hidden;
+                 DROP INDEX IF EXISTS idx_files_session_ext;
+                 DROP INDEX IF EXISTS idx_files_session_subcat;
+                 DROP INDEX IF EXISTS idx_files_session_app;
+                 DELETE FROM app_settings WHERE key = 'maintenance:compact_pending';",
+            )?;
+        }
+
+        // Automatically prune superseded raw file/directory trees from older scans on startup
+        // (preserving lightweight scan_sessions, category_summaries, and storage_snapshots)
+        // and reclaim freed pages on disk when significant bloat is present.
+        let (pruned, reclaimed) =
+            self.prune_superseded_scans_and_reclaim(None, true, true)?;
+        if pruned > 0 || reclaimed > 0 {
+            info!(
+                "Startup retention pruned {} superseded session tree(s) and reclaimed {} bytes",
+                pruned, reclaimed
+            );
+        }
+
+        if needs_dirs_unique || needs_orphans || needs_summaries || needs_compact {
+            info!("Deferred database startup maintenance complete");
+        }
         Ok(())
+    }
+
+    /// Identifies superseded scan sessions that still store bulky raw rows in `files`,
+    /// `directories`, `scan_errors`, `classification_summaries`, `developer_projects`,
+    /// `developer_ecosystem_summaries`, or `storage_recommendations`.
+    ///
+    /// Retention rule per `drive_id`:
+    /// - Never prunes currently `running` or `paused` sessions.
+    /// - Retains full row-level details ONLY for the newest completed session (preferring
+    ///   sessions with `total_files > 0`) on that drive, or—if no completed session exists—
+    ///   the newest non-empty `interrupted`/`cancelled` fallback session when requested.
+    /// - Lightweight history records (`scan_sessions`, `category_summaries`, `storage_snapshots`)
+    ///   are ALWAYS preserved.
+    pub fn find_superseded_detail_session_ids(
+        &self,
+        drive_filter: Option<&str>,
+        preserve_latest_fallback_if_no_completed: bool,
+    ) -> Result<Vec<String>> {
+        if let Some(id) = drive_filter {
+            if id.trim().is_empty() {
+                return Ok(Vec::new());
+            }
+        }
+        self.with_read_conn(|conn| {
+            use std::collections::HashMap;
+
+            #[derive(Clone)]
+            struct SessRow {
+                id: String,
+                drive_id: String,
+                status: String,
+                total_files: i64,
+            }
+
+            let rows_vec: Vec<SessRow> = if let Some(did) = drive_filter {
+                let mut stmt = conn.prepare(
+                    "SELECT id, drive_id, status, COALESCE(total_files, 0)
+                     FROM scan_sessions
+                     WHERE drive_id = ?1
+                     ORDER BY (CASE WHEN COALESCE(total_files, 0) > 0 THEN 0 ELSE 1 END) ASC,
+                              started_at DESC,
+                              rowid DESC",
+                )?;
+                let mapped = stmt.query_map([did], |r| {
+                    Ok(SessRow {
+                        id: r.get(0)?,
+                        drive_id: r.get(1)?,
+                        status: r.get(2)?,
+                        total_files: r.get(3)?,
+                    })
+                })?;
+                mapped.filter_map(|r| r.ok()).collect()
+            } else {
+                let mut stmt = conn.prepare(
+                    "SELECT id, drive_id, status, COALESCE(total_files, 0)
+                     FROM scan_sessions
+                     ORDER BY (CASE WHEN COALESCE(total_files, 0) > 0 THEN 0 ELSE 1 END) ASC,
+                              started_at DESC,
+                              rowid DESC",
+                )?;
+                let mapped = stmt.query_map([], |r| {
+                    Ok(SessRow {
+                        id: r.get(0)?,
+                        drive_id: r.get(1)?,
+                        status: r.get(2)?,
+                        total_files: r.get(3)?,
+                    })
+                })?;
+                mapped.filter_map(|r| r.ok()).collect()
+            };
+
+            let mut by_drive: HashMap<String, Vec<SessRow>> = HashMap::new();
+            for row in rows_vec {
+                by_drive.entry(row.drive_id.clone()).or_default().push(row);
+            }
+
+            let is_completed = |st: &str| {
+                matches!(
+                    st,
+                    "completed" | "completed_with_errors" | "completedWithErrors"
+                )
+            };
+            let is_active = |st: &str| matches!(st, "running" | "paused");
+            let is_fallback = |st: &str, tf: i64| {
+                tf > 0 && matches!(st, "interrupted" | "cancelled")
+            };
+
+            let mut candidates: Vec<String> = Vec::new();
+
+            for (_drive, list) in by_drive {
+                let keep_id: Option<String> = list
+                    .iter()
+                    .find(|s| is_completed(&s.status))
+                    .map(|s| s.id.clone())
+                    .or_else(|| {
+                        if preserve_latest_fallback_if_no_completed {
+                            list.iter()
+                                .find(|s| is_fallback(&s.status, s.total_files))
+                                .map(|s| s.id.clone())
+                        } else {
+                            None
+                        }
+                    });
+
+                for s in list {
+                    if is_active(&s.status) {
+                        continue;
+                    }
+                    if keep_id.as_deref() == Some(s.id.as_str()) {
+                        continue;
+                    }
+
+                    // Fast O(log N) existence check via session_id prefix indexes
+                    let has_heavy_rows: bool = conn
+                        .query_row(
+                            "SELECT
+                                EXISTS(SELECT 1 FROM files WHERE session_id = ?1 LIMIT 1)
+                                OR EXISTS(SELECT 1 FROM directories WHERE session_id = ?1 LIMIT 1)
+                                OR EXISTS(SELECT 1 FROM scan_errors WHERE session_id = ?1 LIMIT 1)
+                                OR EXISTS(SELECT 1 FROM classification_summaries WHERE session_id = ?1 LIMIT 1)
+                                OR EXISTS(SELECT 1 FROM developer_projects WHERE session_id = ?1 LIMIT 1)
+                                OR EXISTS(SELECT 1 FROM developer_ecosystem_summaries WHERE session_id = ?1 LIMIT 1)
+                                OR EXISTS(SELECT 1 FROM storage_recommendations WHERE session_id = ?1 LIMIT 1)",
+                            [&s.id],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or(false);
+
+                    if has_heavy_rows {
+                        candidates.push(s.id);
+                    }
+                }
+            }
+
+            Ok(candidates)
+        })
+    }
+
+    /// Removes heavy row-level scan data for a single session while preserving its
+    /// `scan_sessions`, `category_summaries`, and `storage_snapshots` history records.
+    pub fn prune_session_heavy_data(&self, session_id: &str) -> Result<()> {
+        let mut conn = self.lock_conn();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM files WHERE session_id = ?1", [session_id])?;
+        tx.execute("DELETE FROM directories WHERE session_id = ?1", [session_id])?;
+        tx.execute("DELETE FROM scan_errors WHERE session_id = ?1", [session_id])?;
+        tx.execute("DELETE FROM classification_summaries WHERE session_id = ?1", [session_id])?;
+        tx.execute("DELETE FROM developer_projects WHERE session_id = ?1", [session_id])?;
+        tx.execute(
+            "DELETE FROM developer_ecosystem_summaries WHERE session_id = ?1",
+            [session_id],
+        )?;
+        tx.execute("DELETE FROM storage_recommendations WHERE session_id = ?1", [session_id])?;
+        tx.execute(
+            "DELETE FROM app_settings WHERE key IN (?1, ?2)",
+            rusqlite::params![
+                format!("dev_analyzed:{}", session_id),
+                format!("intel_generated:{}", session_id)
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Reclaims unused SQLite freelist pages and truncates the WAL journal back to 0 bytes.
+    ///
+    /// - On `auto_vacuum = INCREMENTAL` (`2`) databases, runs fast `PRAGMA incremental_vacuum`
+    ///   without copying the file or needing 2x free disk space.
+    /// - On legacy `auto_vacuum = NONE` (`0`) databases, upgrades once to `INCREMENTAL` via
+    ///   `VACUUM` only when `allow_one_time_full_vacuum` is enabled, significant wasted space
+    ///   exists (`>= 32 MB` or `>= 20%` freelist), and the host volume has safe free headroom.
+    pub fn reclaim_free_pages(&self, allow_one_time_full_vacuum: bool) -> Result<u64> {
+        if self.is_memory {
+            return Ok(0);
+        }
+
+        let (prev_db, prev_wal) = self.file_sizes();
+        let before_total = prev_db + prev_wal;
+
+        {
+            let conn = self.lock_conn();
+            let auto_vac: i64 = conn.query_row("PRAGMA auto_vacuum;", [], |r| r.get(0)).unwrap_or(0);
+            let freelist: i64 = conn.query_row("PRAGMA freelist_count;", [], |r| r.get(0)).unwrap_or(0);
+            let page_count: i64 = conn.query_row("PRAGMA page_count;", [], |r| r.get(0)).unwrap_or(0);
+            let page_size: i64 = conn.query_row("PRAGMA page_size;", [], |r| r.get(0)).unwrap_or(4096);
+
+            let freelist_bytes = (freelist.max(0) as u64).saturating_mul(page_size.max(0) as u64);
+            let live_bytes = (page_count.saturating_sub(freelist).max(0) as u64)
+                .saturating_mul(page_size.max(0) as u64);
+
+            if auto_vac == 2 {
+                if freelist > 0 {
+                    conn.execute_batch("PRAGMA incremental_vacuum; PRAGMA wal_checkpoint(TRUNCATE);")?;
+                } else {
+                    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+                }
+            } else if allow_one_time_full_vacuum
+                && freelist > 0
+                && (freelist_bytes >= 32 * 1024 * 1024
+                    || freelist.saturating_mul(5) >= page_count.max(1))
+                && Self::has_vacuum_disk_headroom(&self.db_path, live_bytes)
+            {
+                info!(
+                    "Converting legacy SQLite DB to incremental auto_vacuum and reclaiming {} bytes of free pages...",
+                    freelist_bytes
+                );
+                conn.execute_batch(
+                    "PRAGMA wal_checkpoint(TRUNCATE);
+                     PRAGMA auto_vacuum = INCREMENTAL;
+                     VACUUM;
+                     PRAGMA wal_checkpoint(TRUNCATE);",
+                )?;
+            } else {
+                conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            }
+        }
+
+        let (curr_db, curr_wal) = self.file_sizes();
+        let after_total = curr_db + curr_wal;
+        Ok(before_total.saturating_sub(after_total))
+    }
+
+    fn has_vacuum_disk_headroom(db_path: &Path, required_live_bytes: u64) -> bool {
+        let disks = sysinfo::Disks::new_with_refreshed_list();
+        let canonical = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
+        let mut best_match: Option<(usize, u64)> = None;
+        for d in disks.list() {
+            let mount = d.mount_point();
+            if canonical.starts_with(mount) {
+                let len = mount.as_os_str().len();
+                if best_match.map_or(true, |(best_len, _)| len > best_len) {
+                    best_match = Some((len, d.available_space()));
+                }
+            }
+        }
+        match best_match {
+            // Require compacted DB size + 512 MB safety margin before running full VACUUM
+            Some((_, avail)) => avail >= required_live_bytes.saturating_add(512 * 1024 * 1024),
+            None => true,
+        }
+    }
+
+    /// Prunes superseded raw scan detail trees and reclaims freed pages on disk.
+    pub fn prune_superseded_scans_and_reclaim(
+        &self,
+        drive_filter: Option<&str>,
+        preserve_latest_fallback_if_no_completed: bool,
+        allow_one_time_full_vacuum: bool,
+    ) -> Result<(usize, u64)> {
+        let sids = self.find_superseded_detail_session_ids(
+            drive_filter,
+            preserve_latest_fallback_if_no_completed,
+        )?;
+        let mut pruned_count = 0usize;
+        for sid in &sids {
+            self.prune_session_heavy_data(sid)?;
+            pruned_count += 1;
+        }
+        let reclaimed = self.reclaim_free_pages(allow_one_time_full_vacuum)?;
+        Ok((pruned_count, reclaimed))
     }
 
     fn find_orphan_sessions_via_skip_scan(&self, table: &str) -> Result<Vec<String>> {
@@ -510,7 +809,7 @@ mod tests {
         {
             let mut conn = pool.lock_conn();
             let version = Migrator::run(&mut conn).unwrap();
-            assert_eq!(version, 11);
+            assert_eq!(version, 12);
         }
 
         pool.run_startup_maintenance().unwrap();
@@ -524,6 +823,24 @@ mod tests {
             )
             .unwrap();
         assert!(idx_exists);
+
+        let dropped_dup_idx: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_dirs_session_path')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!dropped_dup_idx, "duplicate idx_dirs_session_path should be dropped");
+
+        let dropped_hidden_idx: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_files_session_hidden')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!dropped_hidden_idx, "unused idx_files_session_hidden should be dropped");
 
         let dir_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM directories", [], |r| r.get(0))
@@ -554,7 +871,7 @@ mod tests {
         let pending_flags: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM app_settings
-                 WHERE key IN ('maintenance:dirs_unique_pending', 'maintenance:orphans_pending', 'maintenance:summaries_pending')",
+                 WHERE key IN ('maintenance:dirs_unique_pending', 'maintenance:orphans_pending', 'maintenance:summaries_pending', 'maintenance:compact_pending')",
                 [],
                 |r| r.get(0),
             )
@@ -571,7 +888,7 @@ mod tests {
         let pool = DbPool::new(&db_path).unwrap();
         {
             let mut conn = pool.lock_conn();
-            assert_eq!(Migrator::run(&mut conn).unwrap(), 11);
+            assert_eq!(Migrator::run(&mut conn).unwrap(), 12);
             DbPool::ensure_directories_unique_index(&conn).unwrap();
 
             conn.execute(
@@ -597,5 +914,118 @@ mod tests {
 
         // Subsequent background maintenance remains idempotent and clears pending flags.
         pool.run_startup_maintenance().unwrap();
+    }
+
+    #[test]
+    fn test_incremental_auto_vacuum_and_superseded_session_pruning_reclaims_space() {
+        let dir = TempTestDir::new("diskatlas_retention_reclaim");
+        let db_path = dir.0.join("diskatlas.db");
+        let pool = DbPool::new(&db_path).unwrap();
+
+        {
+            let mut conn = pool.lock_conn();
+            let auto_vac: i64 = conn.query_row("PRAGMA auto_vacuum;", [], |r| r.get(0)).unwrap();
+            assert_eq!(auto_vac, 2, "New DBs should default to INCREMENTAL auto_vacuum");
+            assert_eq!(Migrator::run(&mut conn).unwrap(), 12);
+
+            conn.execute(
+                "INSERT INTO drives (id, label, mount_point, filesystem, total_bytes, available_bytes)
+                 VALUES ('MAC', 'Macintosh HD', '/', 'apfs', 1000000, 500000)",
+                [],
+            )
+            .unwrap();
+
+            conn.execute(
+                "INSERT INTO scan_sessions (id, drive_id, root_path, status, total_files, total_directories, total_bytes, started_at)
+                 VALUES
+                    ('sess-old', 'MAC', '/', 'completed', 500, 1, 500000, '2026-11-01 10:00:00'),
+                    ('sess-new', 'MAC', '/', 'completed', 10, 1, 10000, '2026-11-02 10:00:00'),
+                    ('sess-cancel', 'MAC', '/', 'cancelled', 200, 1, 20000, '2026-11-03 10:00:00')",
+                [],
+            )
+            .unwrap();
+
+            conn.execute(
+                "INSERT INTO category_summaries (session_id, category, file_count, total_bytes)
+                 VALUES ('sess-old', 'documents', 500, 500000), ('sess-new', 'documents', 10, 10000)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO storage_snapshots (id, session_id, drive_id, label, root_path, total_files, total_directories, total_bytes)
+                 VALUES ('snap-old', 'sess-old', 'MAC', 'Scan Completed', '/', 500, 1, 500000)",
+                [],
+            )
+            .unwrap();
+
+            let tx = conn.unchecked_transaction().unwrap();
+            {
+                let mut ins = tx
+                    .prepare_cached(
+                        "INSERT INTO files (session_id, path, name, parent_path, size_bytes, category)
+                         VALUES (?1, ?2, 'f.bin', '/tmp', 1024, 'documents')",
+                    )
+                    .unwrap();
+                for i in 0..3000 {
+                    ins.execute(rusqlite::params!["sess-old", format!("/tmp/old_{}_{}.bin", i, "x".repeat(48))])
+                        .unwrap();
+                }
+                for i in 0..200 {
+                    ins.execute(rusqlite::params!["sess-cancel", format!("/tmp/cancel_{}.bin", i)])
+                        .unwrap();
+                }
+                for i in 0..10 {
+                    ins.execute(rusqlite::params!["sess-new", format!("/tmp/new_{}.bin", i)])
+                        .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        }
+
+        pool.checkpoint_wal().unwrap();
+        let (before_db, before_wal) = pool.file_sizes();
+        let before_total = before_db + before_wal;
+
+        let (pruned, reclaimed) = pool
+            .prune_superseded_scans_and_reclaim(Some("MAC"), false, false)
+            .unwrap();
+        assert_eq!(pruned, 2, "Both sess-old and sess-cancel should be pruned");
+
+        let (after_db, after_wal) = pool.file_sizes();
+        let after_total = after_db + after_wal;
+        assert!(
+            after_total < before_total && reclaimed > 0,
+            "Incremental vacuum should shrink file size (before={}, after={}, reclaimed={})",
+            before_total,
+            after_total,
+            reclaimed
+        );
+
+        let conn = pool.lock_conn();
+        let old_files: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files WHERE session_id = 'sess-old'", [], |r| r.get(0))
+            .unwrap();
+        let cancel_files: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files WHERE session_id = 'sess-cancel'", [], |r| r.get(0))
+            .unwrap();
+        let new_files: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files WHERE session_id = 'sess-new'", [], |r| r.get(0))
+            .unwrap();
+        let hist_sessions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM scan_sessions WHERE drive_id = 'MAC'", [], |r| r.get(0))
+            .unwrap();
+        let cat_sums: i64 = conn
+            .query_row("SELECT COUNT(*) FROM category_summaries WHERE session_id = 'sess-old'", [], |r| r.get(0))
+            .unwrap();
+        let snaps: i64 = conn
+            .query_row("SELECT COUNT(*) FROM storage_snapshots WHERE session_id = 'sess-old'", [], |r| r.get(0))
+            .unwrap();
+
+        assert_eq!(old_files, 0);
+        assert_eq!(cancel_files, 0);
+        assert_eq!(new_files, 10);
+        assert_eq!(hist_sessions, 3, "Historical scan session metadata must stay intact");
+        assert_eq!(cat_sums, 1, "Historical category summaries must stay intact");
+        assert_eq!(snaps, 1, "Historical storage snapshots must stay intact");
     }
 }
